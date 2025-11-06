@@ -55,7 +55,10 @@ except ImportError as exc:  # pragma: no cover - import shim
     _ASYNC_SNMP = False
     _ASYNC_IMPORT_ERROR = exc
 
-from pysnmp.smi.rfc1902 import Integer, OctetString
+try:  # pragma: no cover - import shim
+    from pysnmp.proto.rfc1902 import Integer, OctetString
+except ImportError:  # pragma: no cover - import shim
+    from pysnmp.smi.rfc1902 import Integer, OctetString
 
 if not _ASYNC_SNMP:
     if not _SYNC_SNMP:
