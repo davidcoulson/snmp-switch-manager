@@ -10,7 +10,7 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import CONF_COMMUNITY, DEFAULT_PORT, DOMAIN
-from .snmp import SnmpError, SwitchSnmpClient
+from .snmp import SnmpDependencyError, SnmpError, SwitchSnmpClient
 
 
 class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -33,6 +33,8 @@ class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 ports = await client.async_get_port_data()
+            except SnmpDependencyError:
+                errors["base"] = "missing_dependency"
             except SnmpError:
                 errors["base"] = "cannot_connect"
             else:

@@ -2,95 +2,144 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Dict, List
-
+from dataclasses import dataclass
 from importlib import import_module
+import logging
+from typing import Any, Dict, List, Sequence, Tuple
 
 _LOGGER = logging.getLogger(__name__)
 
-_BASE_IMPORT_ERROR: Exception | None = None
-CommunityData = ContextData = ObjectIdentity = ObjectType = SnmpEngine = None  # type: ignore[assignment]
-UdpTransportTarget = None  # type: ignore[assignment]
 
-for _module_name in ("pysnmp.hlapi", "pysnmp.hlapi.asyncio"):
-    try:
-        _module = import_module(_module_name)
-        CommunityData = getattr(_module, "CommunityData")
-        ContextData = getattr(_module, "ContextData")
-        ObjectIdentity = getattr(_module, "ObjectIdentity")
-        ObjectType = getattr(_module, "ObjectType")
-        SnmpEngine = getattr(_module, "SnmpEngine")
-        UdpTransportTarget = getattr(_module, "UdpTransportTarget")
-        break
-    except (ImportError, AttributeError) as exc:  # pragma: no cover - import shim
-        _BASE_IMPORT_ERROR = exc
-else:  # pragma: no cover - import shim
-    raise ImportError(
-        "Unable to locate pysnmp CommunityData/ContextData helpers"
-    ) from _BASE_IMPORT_ERROR
+@dataclass(frozen=True)
+class _SnmpHelpers:
+    """Holds callable references for either async or sync pysnmp backends."""
+
+    is_async: bool
+    community_cls: Any
+    context_cls: Any
+    object_identity_cls: Any
+    object_type_cls: Any
+    snmp_engine_cls: Any
+    transport_target_cls: Any
+    get_cmd: Any
+    next_cmd: Any
+    set_cmd: Any
+    integer_cls: Any
+    octet_string_cls: Any
 
 
-try:  # pragma: no cover - import shim
-    from pysnmp.hlapi import (
-        getCmd as sync_getCmd,
-        nextCmd as sync_nextCmd,
-        setCmd as sync_setCmd,
-    )
-    _SYNC_SNMP = True
-    _SYNC_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:  # pragma: no cover - import shim
-    _SYNC_SNMP = False
-    _SYNC_IMPORT_ERROR = exc
-
-try:  # pragma: no cover - import shim
-    from pysnmp.hlapi.asyncio import (
-        getCmd as async_getCmd,
-        nextCmd as async_nextCmd,
-        setCmd as async_setCmd,
-    )
-    _ASYNC_SNMP = True
-    _ASYNC_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:  # pragma: no cover - import shim
-    _ASYNC_SNMP = False
-    _ASYNC_IMPORT_ERROR = exc
-
-try:  # pragma: no cover - import shim
-    from pysnmp.proto.rfc1902 import Integer, OctetString
-except ImportError:  # pragma: no cover - import shim
-    from pysnmp.smi.rfc1902 import Integer, OctetString
-
-if not _ASYNC_SNMP:
-    if not _SYNC_SNMP:
-        missing = _ASYNC_IMPORT_ERROR or _SYNC_IMPORT_ERROR or _BASE_IMPORT_ERROR
-        raise ImportError(
-            "pysnmp getCmd helpers are unavailable in both asyncio and sync variants"
-        ) from missing
-
-    missing_detail = ""
-    if _ASYNC_IMPORT_ERROR is not None:
-        missing_detail = f" ({_ASYNC_IMPORT_ERROR})"
-    _LOGGER.warning(
-        "pysnmp.asyncio helpers unavailable; falling back to threaded SNMP calls%s",
-        missing_detail,
-    )
+_HELPERS: _SnmpHelpers | None = None
 
 
 class SnmpError(Exception):
     """Raised when an SNMP operation fails."""
 
 
+class SnmpDependencyError(SnmpError):
+    """Raised when pysnmp helpers cannot be loaded."""
+
+
+def _import_first_available(module_names: Sequence[str], attribute: str | None = None) -> Any:
+    """Try importing modules until one succeeds."""
+
+    last_error: Exception | None = None
+    for module_name in module_names:
+        try:
+            module = import_module(module_name)
+        except Exception as err:  # pragma: no cover - import shim
+            last_error = err
+            continue
+        if attribute is None:
+            return module
+        try:
+            return getattr(module, attribute)
+        except AttributeError as err:  # pragma: no cover - import shim
+            last_error = err
+            continue
+    raise SnmpDependencyError(
+        f"Unable to import {attribute or 'module'} from {module_names!r}"
+    ) from last_error
+
+
+def _load_helpers() -> _SnmpHelpers:
+    """Load pysnmp helpers, preferring asyncio and falling back to sync."""
+
+    global _HELPERS
+    if _HELPERS is not None:
+        return _HELPERS
+
+    try:
+        module = import_module("pysnmp.hlapi.asyncio")
+        helpers = _SnmpHelpers(
+            is_async=True,
+            community_cls=module.CommunityData,
+            context_cls=module.ContextData,
+            object_identity_cls=module.ObjectIdentity,
+            object_type_cls=module.ObjectType,
+            snmp_engine_cls=module.SnmpEngine,
+            transport_target_cls=module.UdpTransportTarget,
+            get_cmd=getattr(module, "getCmd"),
+            next_cmd=getattr(module, "nextCmd"),
+            set_cmd=getattr(module, "setCmd"),
+            integer_cls=_import_first_available(
+                ("pysnmp.proto.rfc1902", "pysnmp.smi.rfc1902"), "Integer"
+            ),
+            octet_string_cls=_import_first_available(
+                ("pysnmp.proto.rfc1902", "pysnmp.smi.rfc1902"), "OctetString"
+            ),
+        )
+        _HELPERS = helpers
+        return helpers
+    except Exception as err:  # pragma: no cover - import shim
+        _LOGGER.debug("pysnmp asyncio helpers unavailable: %s", err)
+
+    try:
+        module = import_module("pysnmp.hlapi")
+        helpers = _SnmpHelpers(
+            is_async=False,
+            community_cls=module.CommunityData,
+            context_cls=module.ContextData,
+            object_identity_cls=module.ObjectIdentity,
+            object_type_cls=module.ObjectType,
+            snmp_engine_cls=module.SnmpEngine,
+            transport_target_cls=module.UdpTransportTarget,
+            get_cmd=getattr(module, "getCmd"),
+            next_cmd=getattr(module, "nextCmd"),
+            set_cmd=getattr(module, "setCmd"),
+            integer_cls=_import_first_available(
+                ("pysnmp.proto.rfc1902", "pysnmp.smi.rfc1902"), "Integer"
+            ),
+            octet_string_cls=_import_first_available(
+                ("pysnmp.proto.rfc1902", "pysnmp.smi.rfc1902"), "OctetString"
+            ),
+        )
+        _HELPERS = helpers
+        _LOGGER.warning(
+            "pysnmp asyncio helpers unavailable; falling back to threaded SNMP calls"
+        )
+        return helpers
+    except Exception as err:  # pragma: no cover - import shim
+        raise SnmpDependencyError(
+            "pysnmp getCmd helpers are unavailable in both asyncio and sync variants"
+        ) from err
+
+
 class SwitchSnmpClient:
     """Simple SNMP v2 client for polling switch information."""
 
     def __init__(self, host: str, community: str, port: int = 161) -> None:
+        helpers = _load_helpers()
+
         self._host = host
         self._community = community
         self._port = port
-        self._engine = SnmpEngine()
-        self._target = UdpTransportTarget((self._host, self._port), timeout=2.0, retries=3)
-        self._auth = CommunityData(self._community, mpModel=1)
-        self._context = ContextData()
+        self._helpers = helpers
+        self._engine = helpers.snmp_engine_cls()
+        self._target = helpers.transport_target_cls(
+            (self._host, self._port), timeout=2.0, retries=3
+        )
+        self._auth = helpers.community_cls(self._community, mpModel=1)
+        self._context = helpers.context_cls()
         self._lock = asyncio.Lock()
 
     async def async_close(self) -> None:
@@ -102,25 +151,29 @@ class SwitchSnmpClient:
     async def async_get(self, oid: str) -> str:
         """Perform an SNMP GET and return the value as a string."""
         async with self._lock:
-            if _ASYNC_SNMP:
-                err_indication, err_status, err_index, var_binds = await async_getCmd(
+            if self._helpers.is_async:
+                err_indication, err_status, err_index, var_binds = await self._helpers.get_cmd(
                     self._engine,
                     self._auth,
                     self._target,
                     self._context,
-                    ObjectType(ObjectIdentity(oid)),
+                    self._helpers.object_type_cls(
+                        self._helpers.object_identity_cls(oid)
+                    ),
                 )
             else:
                 loop = asyncio.get_running_loop()
 
                 def _worker():
                     return next(
-                        sync_getCmd(
+                        self._helpers.get_cmd(
                             self._engine,
                             self._auth,
                             self._target,
                             self._context,
-                            ObjectType(ObjectIdentity(oid)),
+                            self._helpers.object_type_cls(
+                                self._helpers.object_identity_cls(oid)
+                            ),
                         )
                     )
 
@@ -134,13 +187,13 @@ class SwitchSnmpClient:
     async def async_set_admin_status(self, index: int, up: bool) -> None:
         """Set the administrative status of an interface."""
         oid = f"1.3.6.1.2.1.2.2.1.7.{index}"
-        value = Integer(1 if up else 2)
+        value = self._helpers.integer_cls(1 if up else 2)
         await self._async_set(oid, value)
 
     async def async_set_alias(self, index: int, alias: str) -> None:
         """Set the alias (description) of an interface."""
         oid = f"1.3.6.1.2.1.31.1.1.1.18.{index}"
-        value = OctetString(alias)
+        value = self._helpers.octet_string_cls(alias)
         await self._async_set(oid, value)
 
     async def async_get_table(self, oid: str) -> Dict[int, str]:
@@ -149,16 +202,21 @@ class SwitchSnmpClient:
         start_oid = oid
 
         async with self._lock:
-            if _ASYNC_SNMP:
-                next_oid: ObjectIdentity | None = ObjectIdentity(start_oid)
+            if self._helpers.is_async:
+                next_oid = self._helpers.object_identity_cls(start_oid)
 
                 while next_oid is not None:
-                    err_indication, err_status, err_index, var_binds = await async_nextCmd(
+                    (
+                        err_indication,
+                        err_status,
+                        err_index,
+                        var_binds,
+                    ) = await self._helpers.next_cmd(
                         self._engine,
                         self._auth,
                         self._target,
                         self._context,
-                        ObjectType(next_oid),
+                        self._helpers.object_type_cls(next_oid),
                         lexicographicMode=False,
                     )
 
@@ -166,8 +224,6 @@ class SwitchSnmpClient:
 
                     if not var_binds:
                         break
-
-                    next_oid = None
 
                     for fetched_oid, value in var_binds:
                         fetched_oid_str = str(fetched_oid)
@@ -180,18 +236,25 @@ class SwitchSnmpClient:
                             _LOGGER.debug("Skipping non-integer OID %s", fetched_oid_str)
                             continue
                         result[index] = str(value)
-                        next_oid = ObjectIdentity(fetched_oid)
+                        next_oid = self._helpers.object_identity_cls(fetched_oid)
             else:
                 loop = asyncio.get_running_loop()
 
                 def _worker() -> Dict[int, str]:
                     sync_result: Dict[int, str] = {}
-                    for err_indication, err_status, err_index, var_binds in sync_nextCmd(
+                    for (
+                        err_indication,
+                        err_status,
+                        err_index,
+                        var_binds,
+                    ) in self._helpers.next_cmd(
                         self._engine,
                         self._auth,
                         self._target,
                         self._context,
-                        ObjectType(ObjectIdentity(start_oid)),
+                        self._helpers.object_type_cls(
+                            self._helpers.object_identity_cls(start_oid)
+                        ),
                         lexicographicMode=False,
                     ):
                         _raise_on_error(err_indication, err_status, err_index)
@@ -240,31 +303,43 @@ class SwitchSnmpClient:
 
     async def _async_set(self, oid: str, value) -> None:
         async with self._lock:
-            if _ASYNC_SNMP:
-                err_indication, err_status, err_index, _ = await async_setCmd(
+            if self._helpers.is_async:
+                (
+                    err_indication,
+                    err_status,
+                    err_index,
+                    _,
+                ) = await self._helpers.set_cmd(
                     self._engine,
                     self._auth,
                     self._target,
                     self._context,
-                    ObjectType(ObjectIdentity(oid), value),
+                    self._helpers.object_type_cls(
+                        self._helpers.object_identity_cls(oid), value
+                    ),
                 )
             else:
                 loop = asyncio.get_running_loop()
 
-                def _worker():
+                def _worker() -> Tuple[Any, Any, Any, Any]:
                     return next(
-                        sync_setCmd(
+                        self._helpers.set_cmd(
                             self._engine,
                             self._auth,
                             self._target,
                             self._context,
-                            ObjectType(ObjectIdentity(oid), value),
+                            self._helpers.object_type_cls(
+                                self._helpers.object_identity_cls(oid), value
+                            ),
                         )
                     )
 
-                err_indication, err_status, err_index, _ = await loop.run_in_executor(
-                    None, _worker
-                )
+                (
+                    err_indication,
+                    err_status,
+                    err_index,
+                    _,
+                ) = await loop.run_in_executor(None, _worker)
 
         _raise_on_error(err_indication, err_status, err_index)
 
