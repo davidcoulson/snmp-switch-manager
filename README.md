@@ -1,6 +1,6 @@
 # Switch Manager for Home Assistant
 
-<p align="center">
+<p align="left">
   <a href="https://hacs.xyz/">
     <img src="https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat&logo=homeassistant" alt="HACS Custom" />
   </a>
