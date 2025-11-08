@@ -15,7 +15,7 @@
   </a>
 </p>
 
-<p align="center">
+<p align="left">
   <a href="https://ko-fi.com/otispresley">
     <img src="https://img.shields.io/badge/Ko--fi-Support%20the%20project-FF5E5B?style=flat&logo=ko-fi" alt="Ko-fi" />
   </a>
