@@ -8,13 +8,41 @@ class SwitchManagerCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config.entities || !Array.isArray(config.entities) || !config.entities.length) {
+    const rawPorts = config.ports ?? config.entities;
+    if (!rawPorts || !Array.isArray(rawPorts) || !rawPorts.length) {
       throw new Error("You must provide a list of port switch entities.");
     }
+
+    const ports = rawPorts.map((entry) => {
+      if (typeof entry === "string") {
+        return { entity: entry };
+      }
+      if (!entry.entity) {
+        throw new Error("Each port entry must include an entity property.");
+      }
+      const normalized = { ...entry };
+      if (normalized.x != null) {
+        normalized.x = Number(normalized.x);
+      }
+      if (normalized.y != null) {
+        normalized.y = Number(normalized.y);
+      }
+      return normalized;
+    });
+
+    let markerSize = Number(config.marker_size ?? 26);
+    if (!Number.isFinite(markerSize) || markerSize <= 0) {
+      markerSize = 26;
+    }
+
     this._config = {
       title: config.title,
       image: config.image,
-      entities: config.entities,
+      layout:
+        config.layout ||
+        (ports.every((port) => Number.isFinite(port.x) && Number.isFinite(port.y)) ? "image" : "grid"),
+      marker_size: markerSize,
+      ports,
     };
     this._render();
   }
@@ -33,10 +61,11 @@ class SwitchManagerCard extends HTMLElement {
       return;
     }
 
-    const entities = this._config.entities
-      .map((entityId) => ({
-        entityId,
-        stateObj: this._hass.states[entityId],
+    const ports = this._config.ports
+      .map((port) => ({
+        ...port,
+        entityId: port.entity,
+        stateObj: this._hass.states[port.entity],
       }))
       .filter((item) => item.stateObj);
 
@@ -58,12 +87,52 @@ class SwitchManagerCard extends HTMLElement {
         font-weight: 500;
         margin-bottom: 12px;
       }
+      .image-container {
+        position: relative;
+        width: 100%;
+        margin-bottom: 12px;
+      }
+      .image-container img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 8px;
+      }
       .switch-image {
         width: 100%;
         max-height: 180px;
         object-fit: contain;
         margin-bottom: 12px;
         border-radius: 8px;
+      }
+      .port-marker {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        border: 2px solid rgba(0, 0, 0, 0.25);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+        background: var(--divider-color);
+        transition: transform 0.1s ease, box-shadow 0.1s ease;
+      }
+      .port-marker:hover {
+        transform: translate(-50%, -50%) scale(1.05);
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+      }
+      .port-marker.on {
+        background: var(--success-color, #21ba45);
+      }
+      .port-marker.off {
+        background: var(--error-color, #db2828);
+      }
+      .port-marker.unknown {
+        background: var(--warning-color, #fbbd08);
       }
       .ports {
         display: grid;
@@ -168,26 +237,70 @@ class SwitchManagerCard extends HTMLElement {
       wrapper.appendChild(header);
     }
 
-    if (this._config.image) {
+    if (
+      this._config.layout === "image" &&
+      this._config.image &&
+      ports.every((port) => Number.isFinite(port.x) && Number.isFinite(port.y))
+    ) {
+      const container = document.createElement("div");
+      container.classList.add("image-container");
+
       const img = document.createElement("img");
       img.src = this._config.image;
-      img.classList.add("switch-image");
       img.alt = this._config.title || "Switch";
-      wrapper.appendChild(img);
-    }
+      container.appendChild(img);
 
-    if (entities.length) {
-      const ports = document.createElement("div");
-      ports.classList.add("ports");
+      ports.forEach(({ entityId, stateObj, x, y, label }) => {
+        const marker = document.createElement("div");
+        marker.classList.add("port-marker");
+        marker.dataset.entity = entityId;
+        marker.style.left = `${x}%`;
+        marker.style.top = `${y}%`;
+        marker.style.width = `${this._config.marker_size}px`;
+        marker.style.height = `${this._config.marker_size}px`;
+        marker.style.fontSize = `${Math.max(Math.round(this._config.marker_size * 0.45), 10)}px`;
+        marker.title = stateObj.attributes.friendly_name || entityId;
 
-      entities.forEach(({ entityId, stateObj }) => {
+        const haState = stateObj.state;
+        if (haState === "on") {
+          marker.classList.add("on");
+        } else if (haState === "off") {
+          marker.classList.add("off");
+        } else {
+          marker.classList.add("unknown");
+        }
+
+        const markerLabel = label ?? stateObj.attributes.port_id ?? "";
+        marker.textContent =
+          markerLabel !== undefined && markerLabel !== null && `${markerLabel}` !== ""
+            ? `${markerLabel}`
+            : "";
+        marker.addEventListener("click", () => this._openDialog(entityId));
+        container.appendChild(marker);
+      });
+
+      wrapper.appendChild(container);
+    } else if (ports.length) {
+      if (this._config.image) {
+        const img = document.createElement("img");
+        img.src = this._config.image;
+        img.classList.add("switch-image");
+        img.alt = this._config.title || "Switch";
+        wrapper.appendChild(img);
+      }
+
+      const portGrid = document.createElement("div");
+      portGrid.classList.add("ports");
+
+      ports.forEach(({ entityId, stateObj, label }) => {
         const port = document.createElement("div");
         port.classList.add("port");
         port.dataset.entity = entityId;
 
         const name = document.createElement("div");
         name.classList.add("port-name");
-        name.textContent = stateObj.attributes.friendly_name || entityId;
+        const hasCustomLabel = label !== undefined && label !== null && `${label}` !== "";
+        name.textContent = hasCustomLabel ? `${label}` : stateObj.attributes.friendly_name || entityId;
         port.appendChild(name);
 
         const status = document.createElement("div");
@@ -209,10 +322,10 @@ class SwitchManagerCard extends HTMLElement {
         port.appendChild(desc);
 
         port.addEventListener("click", () => this._openDialog(entityId));
-        ports.appendChild(port);
+        portGrid.appendChild(port);
       });
 
-      wrapper.appendChild(ports);
+      wrapper.appendChild(portGrid);
     } else {
       const empty = document.createElement("div");
       empty.style.fontStyle = "italic";

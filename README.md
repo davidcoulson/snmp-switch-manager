@@ -84,14 +84,37 @@ Switch Manager discovers an SNMP-enabled switch and exposes each port to [Home A
    ```yaml
    type: custom:switch-manager-card
    title: Core Switch
-   image: /local/images/core-switch.png
    entities:
      - switch.core_switch_port_1
      - switch.core_switch_port_2
      - switch.core_switch_port_3
    ```
 
-Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
+   Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
+
+### Overlay a custom switch image
+
+Export the layout of your switch (for example, from Visio) as an image that lives under `/config/www`. The card can place colour-coded markers on top of that image by switching to the `image` layout and providing coordinates for every port:
+
+```yaml
+type: custom:switch-manager-card
+title: Bonus Closet Switch
+image: /local/images/bonus-closet-switch.png
+layout: image
+marker_size: 28  # optional, defaults to 26px
+ports:
+  - entity: switch.bonus_closet_port_1
+    label: 1
+    x: 12.5   # percentage from the left edge
+    y: 62     # percentage from the top edge
+  - entity: switch.bonus_closet_port_2
+    label: 2
+    x: 23
+    y: 62
+  # ...repeat for each port you want to place on the image
+```
+
+Markers adopt the port’s administrative status—green for enabled, red for disabled, amber for unknown—and clicking them opens the same management dialog shown in the grid layout.
 
 ---
 
