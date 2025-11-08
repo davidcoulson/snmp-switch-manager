@@ -8,8 +8,10 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.requirements import async_process_requirements
 
 from .const import (
     CONF_COMMUNITY,
@@ -17,6 +19,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     PLATFORMS,
+    REQUIREMENTS,
     SERVICE_FIELD_DESCRIPTION,
     SERVICE_FIELD_ENTITY_ID,
     SERVICE_SET_PORT_DESCRIPTION,
@@ -36,6 +39,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: SwitchManagerConfigEntry) -> bool:
     """Set up Switch Manager from a config entry."""
     domain_data = hass.data.setdefault(DOMAIN, {"entries": {}, "service_registered": False})
+
+    try:
+        await async_process_requirements(hass, DOMAIN, REQUIREMENTS)
+    except Exception as err:  # pragma: no cover - depends on runtime
+        raise ConfigEntryNotReady(f"Unable to install pysnmp requirements: {err}") from err
 
     client = SwitchSnmpClient(
         host=entry.data[CONF_HOST],
