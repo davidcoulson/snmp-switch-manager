@@ -21,17 +21,23 @@ class SnmpDependencyError(SnmpError):
     """Raised when pysnmp helpers cannot be loaded."""
 
 
-REQUIRED_CMDGEN_SYMBOLS: Sequence[str] = (
-    "CommandGenerator",
+REQUIRED_HELPER_SYMBOLS: Sequence[str] = (
+    "SnmpEngine",
     "CommunityData",
     "UdpTransportTarget",
+    "ObjectType",
+    "ObjectIdentity",
+    "getCmd",
+    "nextCmd",
+    "setCmd",
 )
 
-CMDGEN_MODULES: Sequence[str] = (
-    "pysnmp.entity.rfc3413.oneliner.cmdgen",
-    "pysnmp.hlapi.cmdgen",
-    "pysnmp.hlapi.v3arch.cmdgen",
-    "pysnmp.hlapi.v1arch.cmdgen",
+OPTIONAL_HELPER_SYMBOLS: Sequence[str] = ("ContextData",)
+
+CANDIDATE_HELPER_MODULES: Sequence[str] = (
+    "pysnmp.hlapi",
+    "pysnmp.hlapi.v1arch",
+    "pysnmp.hlapi.v3arch",
 )
 
 PROTO_MODULES: Sequence[str] = (
@@ -61,18 +67,16 @@ def _import_first_available(module_names: Sequence[str], error: str) -> Any:
 
 
 def _load_helper_symbols() -> Dict[str, Any]:
-    """Import pysnmp CommandGenerator helpers and supporting types."""
+    """Import pysnmp helpers and supporting types."""
 
-    last_error: Exception | None = None
-
-    for module_name in CMDGEN_MODULES:
+    for module_name in CANDIDATE_HELPER_MODULES:
         module = _import_optional(module_name)
         if module is None:
             continue
 
         missing = [
             symbol
-            for symbol in REQUIRED_CMDGEN_SYMBOLS
+            for symbol in REQUIRED_HELPER_SYMBOLS
             if getattr(module, symbol, None) is None
         ]
         if missing:
@@ -81,32 +85,15 @@ def _load_helper_symbols() -> Dict[str, Any]:
             )
             continue
 
-        command_generator_cls = module.CommandGenerator
-        method_gaps = [
-            name
-            for name in ("getCmd", "nextCmd", "setCmd")
-            if not callable(getattr(command_generator_cls, name, None))
-        ]
-        if method_gaps:
-            _LOGGER.debug(
-                "CommandGenerator from %s missing methods: %s",
-                module_name,
-                ", ".join(method_gaps),
-            )
-            last_error = SnmpDependencyError(
-                "pysnmp missing attributes: " + ", ".join(method_gaps)
-            )
-            continue
-
         helpers: Dict[str, Any] = {
-            "CommandGenerator": command_generator_cls,
-            "CommunityData": module.CommunityData,
-            "UdpTransportTarget": module.UdpTransportTarget,
+            symbol: getattr(module, symbol)
+            for symbol in REQUIRED_HELPER_SYMBOLS
         }
 
-        context_cls = getattr(module, "ContextData", None)
-        if context_cls is not None:
-            helpers["ContextData"] = context_cls
+        for symbol in OPTIONAL_HELPER_SYMBOLS:
+            attr = getattr(module, symbol, None)
+            if attr is not None:
+                helpers[symbol] = attr
 
         proto = _import_first_available(
             PROTO_MODULES, "pysnmp proto helpers unavailable"
@@ -115,9 +102,6 @@ def _load_helper_symbols() -> Dict[str, Any]:
         helpers["OctetString"] = getattr(proto, "OctetString")
 
         return helpers
-
-    if last_error is not None:
-        raise last_error
 
     raise SnmpDependencyError("pysnmp command helpers are unavailable")
 
@@ -169,10 +153,15 @@ class SwitchSnmpClient:
         community: str,
         port: int = 161,
     ) -> None:
-        self._CommandGenerator = helpers["CommandGenerator"]
+        self._SnmpEngine = helpers["SnmpEngine"]
         self._CommunityData = helpers["CommunityData"]
         self._UdpTransportTarget = helpers["UdpTransportTarget"]
         self._ContextData = helpers.get("ContextData")
+        self._ObjectType = helpers["ObjectType"]
+        self._ObjectIdentity = helpers["ObjectIdentity"]
+        self._getCmd = helpers["getCmd"]
+        self._nextCmd = helpers["nextCmd"]
+        self._setCmd = helpers["setCmd"]
         self._Integer = helpers["Integer"]
         self._OctetString = helpers["OctetString"]
 
@@ -180,13 +169,12 @@ class SwitchSnmpClient:
         self._community = community
         self._port = port
 
-        self._generator = self._CommandGenerator()
+        self._engine = self._SnmpEngine()
         self._auth = self._CommunityData(self._community, mpModel=1)
         self._target = self._UdpTransportTarget(
             (self._host, self._port), timeout=2.0, retries=3
         )
         self._context = self._ContextData() if self._ContextData is not None else None
-        self._supports_context = self._context is not None
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -203,30 +191,11 @@ class SwitchSnmpClient:
 
         return None
 
-    def _invoke_cmd(self, method_name: str, *var_binds, **kwargs):
-        method = getattr(self._generator, method_name)
-        kwargs.setdefault("lookupNames", False)
-        kwargs.setdefault("lookupValues", False)
-
-        args = [self._auth, self._target]
-        if self._supports_context and self._context is not None:
+    def _build_command_args(self) -> list[Any]:
+        args: list[Any] = [self._engine, self._auth, self._target]
+        if self._context is not None:
             args.append(self._context)
-        args.extend(var_binds)
-
-        try:
-            return method(*args, **kwargs)
-        except TypeError as err:
-            if self._supports_context:
-                _LOGGER.debug(
-                    "ContextData unsupported for %s, retrying without it: %s",
-                    method_name,
-                    err,
-                )
-                self._supports_context = False
-                args = [self._auth, self._target]
-                args.extend(var_binds)
-                return method(*args, **kwargs)
-            raise
+        return args
 
     async def _async_get_value(self, oid: str) -> Any:
         """Fetch a raw SNMP value while holding the shared lock."""
@@ -241,9 +210,18 @@ class SwitchSnmpClient:
         return _format_snmp_value(value)
 
     def _sync_get_value(self, oid: str) -> Any:
-        err_indication, err_status, err_index, var_binds = self._invoke_cmd(
-            "getCmd", oid
+        args = self._build_command_args()
+        object_type = self._ObjectType(self._ObjectIdentity(oid))
+        iterator = self._getCmd(
+            *args,
+            object_type,
+            lookupNames=False,
+            lookupValues=False,
         )
+        try:
+            err_indication, err_status, err_index, var_binds = next(iterator)
+        except StopIteration as err:  # pragma: no cover - defensive
+            raise SnmpError("SNMP GET returned no data") from err
         _raise_on_error(err_indication, err_status, err_index)
         return var_binds[0][1]
 
@@ -268,9 +246,18 @@ class SwitchSnmpClient:
             await asyncio.to_thread(self._sync_set, oid, value)
 
     def _sync_set(self, oid: str, value: Any) -> None:
-        err_indication, err_status, err_index, _ = self._invoke_cmd(
-            "setCmd", (oid, value)
+        args = self._build_command_args()
+        object_type = self._ObjectType(self._ObjectIdentity(oid), value)
+        iterator = self._setCmd(
+            *args,
+            object_type,
+            lookupNames=False,
+            lookupValues=False,
         )
+        try:
+            err_indication, err_status, err_index, _ = next(iterator)
+        except StopIteration as err:  # pragma: no cover - defensive
+            raise SnmpError("SNMP SET returned no data") from err
         _raise_on_error(err_indication, err_status, err_index)
 
     async def async_get_table(self, oid: str) -> Dict[int, str]:
@@ -283,16 +270,23 @@ class SwitchSnmpClient:
         result: Dict[int, str] = {}
         start_oid = oid
 
-        err_indication, err_status, err_index, var_bind_table = self._invoke_cmd(
-            "nextCmd", oid, lexicographicMode=False
+        args = self._build_command_args()
+        object_type = self._ObjectType(self._ObjectIdentity(oid))
+        iterator = self._nextCmd(
+            *args,
+            object_type,
+            lexicographicMode=False,
+            lookupNames=False,
+            lookupValues=False,
         )
-        _raise_on_error(err_indication, err_status, err_index)
 
-        if not var_bind_table:
-            return result
+        for err_indication, err_status, err_index, var_binds in iterator:
+            _raise_on_error(err_indication, err_status, err_index)
 
-        for row in var_bind_table:
-            for fetched_oid, value in row:
+            if not var_binds:
+                continue
+
+            for fetched_oid, value in var_binds:
                 fetched_oid_str = str(fetched_oid)
                 if not fetched_oid_str.startswith(start_oid):
                     return result
