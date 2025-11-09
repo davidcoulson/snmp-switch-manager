@@ -3,16 +3,37 @@ from __future__ import annotations
 
 from typing import Iterable, Tuple, Any
 
+__all__ = [
+    "SnmpError",
+    "SnmpDependencyError",
+    "ensure_snmp_available",
+    "validate_environment_or_raise",
+    "snmp_get",
+    "snmp_walk",
+    "snmp_set_octet_string",
+]
 
-class SnmpDependencyError(RuntimeError):
+
+# ---- Exceptions (backward compatible) ---------------------------------------
+
+
+class SnmpError(RuntimeError):
+    """Base SNMP error for this integration."""
+
+
+class SnmpDependencyError(SnmpError):
     """Raised when pysnmp cannot be imported/used."""
 
 
-def _imports():
-    """Lazy-import pysnmp HLAPI so HA can install requirements first.
+# ---- Lazy HLAPI import (works with pysnmp-lextudio>=5 and pysnmp 4.x) -------
 
-    Works with pysnmp-lextudio 5.x (maintained) and classic pysnmp 4.x,
-    but we *only* rely on the HLAPI symbols that both provide.
+
+def _imports():
+    """
+    Lazy-import pysnmp HLAPI so HA can install requirements first.
+
+    We intentionally avoid the legacy CommandGenerator API; both pysnmp 4.x and
+    pysnmp-lextudio 5.x provide the HLAPI we use here.
     """
     try:
         from pysnmp.hlapi import (  # type: ignore
@@ -27,7 +48,7 @@ def _imports():
             setCmd,
         )
     except Exception as e:  # pragma: no cover
-        # Keep the message terse; config_flow surfaces a generic UI error.
+        # Keep raw reason in logs; UI shows a generic dependency error.
         raise SnmpDependencyError(f"pysnmp.hlapi import failed: {e}")
 
     return (
@@ -43,9 +64,22 @@ def _imports():
     )
 
 
+# ---- Public helpers ----------------------------------------------------------
+
+
 def ensure_snmp_available() -> None:
     """Used by config_flow to verify HLAPI availability once."""
     _imports()  # raises SnmpDependencyError on failure
+
+
+def validate_environment_or_raise() -> None:
+    """
+    Backward-compatible alias used by older code paths.
+
+    Prior versions called this to validate pysnmp availability. Keep it to
+    avoid import errors from modules that haven't been updated yet.
+    """
+    ensure_snmp_available()
 
 
 def snmp_get(host: str, community: str, port: int, oid: str) -> Any:
@@ -72,10 +106,10 @@ def snmp_get(host: str, community: str, port: int, oid: str) -> Any:
 
     error_indication, error_status, error_index, var_binds = next(iterator)
     if error_indication:
-        raise RuntimeError(error_indication)
+        raise SnmpError(error_indication)
     if error_status:
         where = var_binds[int(error_index) - 1][0] if error_index else "?"
-        raise RuntimeError(f"{error_status.prettyPrint()} at {where}")
+        raise SnmpError(f"{error_status.prettyPrint()} at {where}")
     # Return the value part of the first var-bind
     return var_binds[0][1]
 
@@ -105,10 +139,10 @@ def snmp_walk(
         lexicographicMode=False,
     ):
         if err_ind:
-            raise RuntimeError(err_ind)
+            raise SnmpError(err_ind)
         if err_stat:
             where = var_binds[int(err_idx) - 1][0] if err_idx else "?"
-            raise RuntimeError(f"{err_stat.prettyPrint()} at {where}")
+            raise SnmpError(f"{err_stat.prettyPrint()} at {where}")
 
         for name, val in var_binds:
             yield (str(name), val)
@@ -140,7 +174,7 @@ def snmp_set_octet_string(
         )
     )
     if err_ind:
-        raise RuntimeError(err_ind)
+        raise SnmpError(err_ind)
     if err_stat:
         where = var_binds[int(err_idx) - 1][0] if err_idx else "?"
-        raise RuntimeError(f"{err_stat.prettyPrint()} at {where}")
+        raise SnmpError(f"{err_stat.prettyPrint()} at {where}")
