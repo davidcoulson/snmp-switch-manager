@@ -1,25 +1,28 @@
-"""Config flow for Switch Manager integration."""
+# custom_components/switch_manager/config_flow.py
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Dict
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.requirements import async_process_requirements
+from homeassistant.core import callback
 
-from .const import CONF_COMMUNITY, DEFAULT_PORT, DOMAIN, REQUIREMENTS
-from .snmp import (
-    SnmpDependencyError,
-    SnmpError,
-    SwitchSnmpClient,
-    reset_backend_cache,
-)
+from .const import DOMAIN  # make sure DOMAIN = "switch_manager"
+from .snmp import ensure_snmp_available, SnmpDependencyError
 
 _LOGGER = logging.getLogger(__name__)
+
+# Form fields shown in the screenshot
+DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required("host"): str,
+        vol.Required("community"): str,
+        vol.Required("port", default=161): int,
+        vol.Optional("name", default="Switch"): str,
+    }
+)
 
 
 class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -27,83 +30,68 @@ class SwitchManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    def __init__(self) -> None:
-        """Initialize the config flow state."""
+    async def async_step_user(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
 
-        self._requirements_ready = False
+        if user_input is None:
+            return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA, errors=errors)
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        errors: dict[str, str] = {}
+        # 1) Ensure HLAPI is importable (dependency installed) — single check.
+        try:
+            await self.hass.async_add_executor_job(ensure_snmp_available)
+        except SnmpDependencyError as err:
+            _LOGGER.error("pysnmp dependency issue: %s", err)
+            errors["base"] = "missing_dependency"
+            return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA, errors=errors)
 
-        if user_input is not None:
-            if not self._requirements_ready:
-                try:
-                    await async_process_requirements(self.hass, DOMAIN, REQUIREMENTS)
-                except Exception as err:  # pragma: no cover - depends on runtime
-                    _LOGGER.exception("Unable to install pysnmp requirements", exc_info=err)
-                    errors["base"] = "missing_dependency"
-                else:
-                    self._requirements_ready = True
-                    reset_backend_cache()
+        # 2) Avoid duplicate entries per host:port
+        unique_id = f"{user_input['host']}:{int(user_input.get('port', 161))}"
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
 
-            if errors:
-                return self.async_show_form(
-                    step_id="user", data_schema=self._build_schema(user_input), errors=errors
-                )
+        # 3) Store the data; device probing occurs in async_setup_entry
+        data = {
+            "host": user_input["host"],
+            "community": user_input["community"],
+            "port": int(user_input.get("port", 161)),
+            "name": user_input.get("name") or "Switch",
+        }
 
-            port = user_input.get(CONF_PORT, DEFAULT_PORT)
-            await self.async_set_unique_id(f"{user_input[CONF_HOST]}:{port}")
-            self._abort_if_unique_id_configured()
-
-            client: SwitchSnmpClient | None = None
-            try:
-                client = await SwitchSnmpClient.async_create(
-                    user_input[CONF_HOST],
-                    user_input[CONF_COMMUNITY],
-                    port,
-                )
-                system_info = await client.async_get_system_info()
-                if not system_info:
-                    raise SnmpError("No system information returned")
-                ports = await client.async_get_port_data()
-            except SnmpDependencyError as err:
-                _LOGGER.error("pysnmp dependency issue: %s", err)
-                errors["base"] = "missing_dependency"
-            except SnmpError as err:
-                _LOGGER.error("Unable to communicate with %s: %s", user_input[CONF_HOST], err)
-                errors["base"] = "cannot_connect"
-            else:
-                if not ports:
-                    errors["base"] = "no_ports"
-                else:
-                    title = user_input.get(CONF_NAME) or user_input[CONF_HOST]
-                    data = {
-                        CONF_HOST: user_input[CONF_HOST],
-                        CONF_COMMUNITY: user_input[CONF_COMMUNITY],
-                        CONF_PORT: port,
-                    }
-                    return self.async_create_entry(title=title, data=data)
-            finally:
-                if client is not None:
-                    await client.async_close()
-
-        return self.async_show_form(
-            step_id="user", data_schema=self._build_schema(user_input), errors=errors
-        )
+        return self.async_create_entry(title=data["name"], data=data)
 
     @staticmethod
-    def _build_schema(user_input: dict[str, Any] | None) -> vol.Schema:
-        defaults = user_input or {}
-        return vol.Schema(
+    @callback
+    def async_get_options_flow(config_entry):
+        return SwitchManagerOptionsFlow(config_entry)
+
+
+class SwitchManagerOptionsFlow(config_entries.OptionsFlow):
+    """Options flow; mirrors the initial schema for simple edits."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._entry = config_entry
+
+    async def async_step_init(self, user_input: Dict[str, Any] | None = None):
+        errors: Dict[str, str] = {}
+
+        if user_input is not None:
+            # Just save; validation handled by runtime and logs
+            return self.async_create_entry(title="", data=user_input)
+
+        defaults = {
+            "host": self._entry.data.get("host", ""),
+            "community": self._entry.data.get("community", ""),
+            "port": self._entry.data.get("port", 161),
+            "name": self._entry.data.get("name", "Switch"),
+        }
+
+        schema = vol.Schema(
             {
-                vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, vol.UNDEFINED)): str,
-                vol.Required(
-                    CONF_COMMUNITY, default=defaults.get(CONF_COMMUNITY, vol.UNDEFINED)
-                ): str,
-                vol.Optional(
-                    CONF_PORT,
-                    default=defaults.get(CONF_PORT, DEFAULT_PORT),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-                vol.Optional(CONF_NAME, default=defaults.get(CONF_NAME, vol.UNDEFINED)): str,
+                vol.Required("host", default=defaults["host"]): str,
+                vol.Required("community", default=defaults["community"]): str,
+                vol.Required("port", default=defaults["port"]): int,
+                vol.Optional("name", default=defaults["name"]): str,
             }
         )
+
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
