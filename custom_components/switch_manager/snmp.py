@@ -54,42 +54,46 @@ class _HlapiBackend(_SnmpBackend):
 
     def __init__(self) -> None:
         try:
-            module = import_module("pysnmp.hlapi")
+            from pysnmp.hlapi import (
+                CommunityData,
+                ObjectIdentity,
+                ObjectType,
+                SnmpEngine,
+                UdpTransportTarget,
+                getCmd,
+                nextCmd,
+                setCmd,
+            )
         except ImportError as err:  # pragma: no cover - depends on runtime env
             raise SnmpDependencyError("pysnmp.hlapi is not available") from err
-
-        missing = [
-            symbol
-            for symbol in (
-                "SnmpEngine",
-                "CommunityData",
-                "UdpTransportTarget",
-                "ObjectType",
-                "ObjectIdentity",
-                "getCmd",
-                "nextCmd",
-                "setCmd",
-            )
-            if getattr(module, symbol, None) is None
-        ]
-        if missing:
+        except AttributeError as err:  # pragma: no cover - depends on runtime env
             raise SnmpDependencyError(
-                "pysnmp.hlapi missing helpers: " + ", ".join(missing)
-            )
+                "pysnmp.hlapi missing helpers: SnmpEngine, CommunityData, UdpTransportTarget, "
+                "ObjectType, ObjectIdentity, getCmd, nextCmd, setCmd"
+            ) from err
 
-        self._SnmpEngine = module.SnmpEngine
-        self._CommunityData = module.CommunityData
-        self._UdpTransportTarget = module.UdpTransportTarget
-        self._ContextData = getattr(module, "ContextData", None)
-        self._ObjectType = module.ObjectType
-        self._ObjectIdentity = module.ObjectIdentity
-        self._getCmd = module.getCmd
-        self._nextCmd = module.nextCmd
-        self._setCmd = module.setCmd
+        try:  # ContextData was introduced later and might be missing
+            from pysnmp.hlapi import ContextData  # type: ignore
+        except (ImportError, AttributeError):  # pragma: no cover - optional helper
+            ContextData = None
 
-        proto = import_module("pysnmp.proto.rfc1902")
-        self.integer_cls = getattr(proto, "Integer")
-        self.octet_string_cls = getattr(proto, "OctetString")
+        try:
+            from pysnmp.proto.rfc1902 import Integer, OctetString
+        except ImportError as err:  # pragma: no cover - depends on runtime env
+            raise SnmpDependencyError("pysnmp.proto.rfc1902 missing value helpers") from err
+
+        self._SnmpEngine = SnmpEngine
+        self._CommunityData = CommunityData
+        self._UdpTransportTarget = UdpTransportTarget
+        self._ContextData = ContextData
+        self._ObjectType = ObjectType
+        self._ObjectIdentity = ObjectIdentity
+        self._getCmd = getCmd
+        self._nextCmd = nextCmd
+        self._setCmd = setCmd
+
+        self.integer_cls = Integer
+        self.octet_string_cls = OctetString
 
     def create_context(self, host: str, port: int, community: str) -> Tuple[Any, ...]:
         engine = self._SnmpEngine()
