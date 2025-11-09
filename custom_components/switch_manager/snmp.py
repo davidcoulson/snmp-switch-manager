@@ -9,11 +9,11 @@ __all__ = [
     "SwitchSnmpClient",
     "ensure_snmp_available",
     "validate_environment_or_raise",
+    "reset_backend_cache",
     "snmp_get",
     "snmp_walk",
     "snmp_set_octet_string",
 ]
-
 
 # -----------------------------------------------------------------------------
 # Exceptions (backward compatible)
@@ -28,8 +28,13 @@ class SnmpDependencyError(SnmpError):
 
 
 # -----------------------------------------------------------------------------
-# Lazy HLAPI import (works with pysnmp-lextudio>=5 and pysnmp 4.x)
+# Lazy HLAPI import with a tiny in-module cache
 # -----------------------------------------------------------------------------
+
+# Cache the imported symbols so we don't import repeatedly.
+# reset_backend_cache() clears this.
+_IMPORTS_CACHE: tuple | None = None
+
 
 def _imports():
     """
@@ -38,6 +43,10 @@ def _imports():
     We intentionally avoid the legacy CommandGenerator API; both pysnmp 4.x and
     pysnmp-lextudio 5.x provide the HLAPI we use here.
     """
+    global _IMPORTS_CACHE
+    if _IMPORTS_CACHE is not None:
+        return _IMPORTS_CACHE
+
     try:
         from pysnmp.hlapi import (  # type: ignore
             SnmpEngine,
@@ -54,7 +63,7 @@ def _imports():
         # Keep raw reason in logs; UI shows a generic dependency error.
         raise SnmpDependencyError(f"pysnmp.hlapi import failed: {e}")
 
-    return (
+    _IMPORTS_CACHE = (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
@@ -65,6 +74,18 @@ def _imports():
         nextCmd,
         setCmd,
     )
+    return _IMPORTS_CACHE
+
+
+def reset_backend_cache() -> None:
+    """
+    Backward-compatible hook used by the config flow to force a fresh import.
+
+    Earlier versions switched between multiple backends; we only use HLAPI,
+    but we keep this symbol so old imports don't fail.
+    """
+    global _IMPORTS_CACHE
+    _IMPORTS_CACHE = None
 
 
 # -----------------------------------------------------------------------------
@@ -200,12 +221,10 @@ class SwitchSnmpClient:
         self._community = community
         self._port = int(port)
 
-    # Optional classmethod so callers can force dependency check explicitly
     @classmethod
     def ensure_available(cls) -> None:
         ensure_snmp_available()
 
-    # Instance helpers used by the integration
     def get(self, oid: str) -> Any:
         return snmp_get(self._host, self._community, self._port, oid)
 
