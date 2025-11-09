@@ -14,7 +14,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to the device using SNMP.",
-      "missing_dependency": "SNMP support is unavailable. Install pysnmp 4.x.",
+      "missing_dependency": "SNMP support is unavailable. SNMP libraries could not be loaded.",
       "no_ports": "The device did not report any ports via SNMP."
     }
   },
