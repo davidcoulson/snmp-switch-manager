@@ -21,7 +21,6 @@ from .const import (
 )
 from . import SwitchCoordinator
 
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
