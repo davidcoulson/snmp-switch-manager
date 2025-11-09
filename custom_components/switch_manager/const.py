@@ -5,7 +5,7 @@ PLATFORMS = ["switch"]
 DEFAULT_PORT = 161
 CONF_COMMUNITY = "community"
 DEFAULT_SCAN_INTERVAL = 30
-REQUIREMENTS = ["pysnmp>=4.4.12,<5"]
+REQUIREMENTS = ["pysnmp-lextudio>=5,<6"]
 ATTR_PORT = "port"
 ATTR_DESCRIPTION = "description"
 ATTR_SPEED = "speed"
