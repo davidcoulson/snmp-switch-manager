@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 from typing import Iterable, Tuple, Any, Optional
@@ -41,8 +42,7 @@ def _imports():
     """
     Lazy-import pysnmp HLAPI so HA can install requirements first.
 
-    We intentionally avoid the legacy CommandGenerator API; pysnmp 4.4.12 and
-    pysnmp-lextudio 5.x both provide the HLAPI we use here.
+    Works with pysnmp 4.4.12 (classic) and pysnmp-lextudio 5.x; we only use HLAPI.
     """
     global _IMPORTS_CACHE
     if _IMPORTS_CACHE is not None:
@@ -85,12 +85,7 @@ def _imports():
 
 
 def reset_backend_cache() -> None:
-    """
-    Backward-compatible hook used by the config flow to force a fresh import.
-
-    Earlier versions switched between multiple backends; we only use HLAPI,
-    but we keep this symbol so old imports don't fail.
-    """
+    """Back-compat hook to clear our small import cache."""
     global _IMPORTS_CACHE
     _IMPORTS_CACHE = None
 
@@ -110,18 +105,8 @@ def validate_environment_or_raise() -> None:
 
 
 def snmp_get(host: str, community: str, port: int, oid: str) -> Any:
-    """Perform a single GET and return the value for the OID."""
-    (
-        SnmpEngine,
-        CommunityData,
-        UdpTransportTarget,
-        ContextData,
-        ObjectType,
-        ObjectIdentity,
-        getCmd,
-        _nextCmd,
-        _setCmd,
-    ) = _imports()
+    (SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
+     ObjectType, ObjectIdentity, getCmd, _nextCmd, _setCmd) = _imports()
 
     iterator = getCmd(
         SnmpEngine(),
@@ -140,21 +125,9 @@ def snmp_get(host: str, community: str, port: int, oid: str) -> Any:
     return var_binds[0][1]
 
 
-def snmp_walk(
-    host: str, community: str, port: int, base_oid: str
-) -> Iterable[Tuple[str, Any]]:
-    """Walk (nextCmd) starting at base_oid and yield (oid, value) pairs."""
-    (
-        SnmpEngine,
-        CommunityData,
-        UdpTransportTarget,
-        ContextData,
-        ObjectType,
-        ObjectIdentity,
-        _getCmd,
-        nextCmd,
-        _setCmd,
-    ) = _imports()
+def snmp_walk(host: str, community: str, port: int, base_oid: str) -> Iterable[Tuple[str, Any]]:
+    (SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
+     ObjectType, ObjectIdentity, _getCmd, nextCmd, _setCmd) = _imports()
 
     for (err_ind, err_stat, err_idx, var_binds) in nextCmd(
         SnmpEngine(),
@@ -169,26 +142,13 @@ def snmp_walk(
         if err_stat:
             where = var_binds[int(err_idx) - 1][0] if err_idx else "?"
             raise SnmpError(f"{err_stat.prettyPrint()} at {where}")
-
         for name, val in var_binds:
             yield (str(name), val)
 
 
-def snmp_set_octet_string(
-    host: str, community: str, port: int, oid: str, value
-) -> None:
-    """Set an OCTET STRING (or compatible) value."""
-    (
-        SnmpEngine,
-        CommunityData,
-        UdpTransportTarget,
-        ContextData,
-        ObjectType,
-        ObjectIdentity,
-        _getCmd,
-        _nextCmd,
-        setCmd,
-    ) = _imports()
+def snmp_set_octet_string(host: str, community: str, port: int, oid: str, value) -> None:
+    (SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
+     ObjectType, ObjectIdentity, _getCmd, _nextCmd, setCmd) = _imports()
 
     err_ind, err_stat, err_idx, var_binds = next(
         setCmd(
@@ -207,7 +167,7 @@ def snmp_set_octet_string(
 
 
 # -----------------------------------------------------------------------------
-# Backward-compatible client wrapper (sync + async)
+# Backward-compatible client wrapper (sync + async; tolerant factory)
 # -----------------------------------------------------------------------------
 
 class SwitchSnmpClient:
@@ -215,21 +175,61 @@ class SwitchSnmpClient:
     Thin wrapper preserved for compatibility with existing modules.
 
     Provides simple get/walk/set methods bound to a host/community/port and
-    async wrappers that run in HA's executor.
+    async wrappers that run in an executor when hass is unavailable.
     """
 
     def __init__(self, hass, host: str, community: str, port: int = 161) -> None:
-        self._hass = hass
+        self._hass = hass  # may be None
         self._host = host
         self._community = community
         self._port = int(port)
 
-    # ---- factory used by __init__.py ----------------------------------------
+    # ---- tolerant factory: supports (hass, host, community, port) OR (host, community, port, hass)
 
     @classmethod
-    async def async_create(cls, hass, host: str, community: str, port: int = 161):
-        # Ensure dependency is present without blocking the event loop
-        await hass.async_add_executor_job(ensure_snmp_available)
+    async def async_create(cls, *args):
+        """
+        Create a client.
+
+        Accepted orders:
+          1) (hass, host, community, port)
+          2) (host, community, port, hass)
+        """
+        hass = None
+        host = ""
+        community = ""
+        port = 161
+
+        if not args:
+            raise SnmpError("async_create requires arguments")
+
+        # Case 1: first arg looks like hass (has async_add_executor_job)
+        first = args[0]
+        if hasattr(first, "async_add_executor_job"):
+            # (hass, host, community, port?)
+            hass = first
+            try:
+                host = args[1]
+                community = args[2]
+                port = int(args[3]) if len(args) > 3 else 161
+            except Exception as e:
+                raise SnmpError(f"async_create(hass, host, community, port) invalid: {e}")
+        else:
+            # (host, community, port?, hass?)
+            try:
+                host = args[0]
+                community = args[1]
+                port = int(args[2]) if len(args) > 2 else 161
+                hass = args[3] if len(args) > 3 and hasattr(args[3], "async_add_executor_job") else None
+            except Exception as e:
+                raise SnmpError(f"async_create(host, community, port[, hass]) invalid: {e}")
+
+        # Ensure dependency without blocking the loop
+        if hass is not None:
+            await hass.async_add_executor_job(ensure_snmp_available)
+        else:
+            ensure_snmp_available()
+
         return cls(hass, host, community, port)
 
     # ---- sync helpers (legacy callers) --------------------------------------
@@ -246,16 +246,26 @@ class SwitchSnmpClient:
     # ---- async helpers (preferred for HA) -----------------------------------
 
     async def async_get(self, oid: str) -> Any:
-        return await self._hass.async_add_executor_job(
-            snmp_get, self._host, self._community, self._port, oid
-        )
+        if self._hass is not None:
+            return await self._hass.async_add_executor_job(
+                snmp_get, self._host, self._community, self._port, oid
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, snmp_get, self._host, self._community, self._port, oid)
 
     async def async_walk(self, base_oid: str) -> Iterable[Tuple[str, Any]]:
-        return await self._hass.async_add_executor_job(
-            lambda: list(snmp_walk(self._host, self._community, self._port, base_oid))
-        )
+        if self._hass is not None:
+            return await self._hass.async_add_executor_job(
+                lambda: list(snmp_walk(self._host, self._community, self._port, base_oid))
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: list(snmp_walk(self._host, self._community, self._port, base_oid)))
 
     async def async_set_octet_string(self, oid: str, value) -> None:
-        await self._hass.async_add_executor_job(
-            snmp_set_octet_string, self._host, self._community, self._port, oid, value
-        )
+        if self._hass is not None:
+            await self._hass.async_add_executor_job(
+                snmp_set_octet_string, self._host, self._community, self._port, oid, value
+            )
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, snmp_set_octet_string, self._host, self._community, self._port, oid, value)
