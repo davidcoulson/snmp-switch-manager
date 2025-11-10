@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-from typing import Iterable, Tuple, Any, Optional
+from typing import Iterable, Tuple, Any, Optional, Dict
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def reset_backend_cache() -> None:
 
 
 # -----------------------------------------------------------------------------
-# Public helpers
+# Public low-level helpers
 # -----------------------------------------------------------------------------
 
 def ensure_snmp_available() -> None:
@@ -177,6 +177,12 @@ class SwitchSnmpClient:
     Provides simple get/walk/set methods bound to a host/community/port and
     async wrappers that run in an executor when hass is unavailable.
     """
+
+    # Standard IF-MIB OIDs we’ll use
+    OID_ifDescr = "1.3.6.1.2.1.2.2.1.2"
+    OID_ifAdminStatus = "1.3.6.1.2.1.2.2.1.7"
+    OID_ifOperStatus = "1.3.6.1.2.1.2.2.1.8"
+    OID_ifAlias = "1.3.6.1.2.1.31.1.1.1.18"  # IF-MIB::ifAlias (human description)
 
     def __init__(self, hass, host: str, community: str, port: int = 161) -> None:
         self._hass = hass  # may be None
@@ -269,3 +275,45 @@ class SwitchSnmpClient:
             return
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, snmp_set_octet_string, self._host, self._community, self._port, oid, value)
+
+    # ---- High-level helpers expected by coordinator --------------------------
+
+    def get_port_data(self) -> Dict[int, Dict[str, Any]]:
+        """
+        Gather port data from IF-MIB.
+
+        Returns:
+          {
+            <ifIndex>: {
+              "index": int,
+              "name": str,        # ifDescr
+              "admin": int,       # ifAdminStatus (1=up,2=down,3=testing)
+              "oper": int,        # ifOperStatus
+              "alias": str        # ifAlias (port description)
+            },
+            ...
+          }
+        """
+        # Walk individual tables then merge by ifIndex
+        descr = {int(oid.split(".")[-1]): str(val) for oid, val in self.walk(self.OID_ifDescr)}
+        admin = {int(oid.split(".")[-1]): int(val) for oid, val in self.walk(self.OID_ifAdminStatus)}
+        oper  = {int(oid.split(".")[-1]): int(val) for oid, val in self.walk(self.OID_ifOperStatus)}
+        alias = {int(oid.split(".")[-1]): str(val) for oid, val in self.walk(self.OID_ifAlias)}
+
+        indices = set(descr) | set(admin) | set(oper) | set(alias)
+        out: Dict[int, Dict[str, Any]] = {}
+        for idx in sorted(indices):
+            out[idx] = {
+                "index": idx,
+                "name": descr.get(idx, ""),
+                "admin": admin.get(idx, 0),
+                "oper": oper.get(idx, 0),
+                "alias": alias.get(idx, ""),
+            }
+        return out
+
+    async def async_get_port_data(self) -> Dict[int, Dict[str, Any]]:
+        if self._hass is not None:
+            return await self._hass.async_add_executor_job(self.get_port_data)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.get_port_data)
