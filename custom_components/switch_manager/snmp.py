@@ -21,9 +21,6 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
-# --------------------------
-# pysnmp import + error types
-# --------------------------
 
 class SnmpError(HomeAssistantError):
     """Generic SNMP error for this integration."""
@@ -34,7 +31,6 @@ class SnmpDependencyError(SnmpError):
 
 
 try:
-    # pysnmp 4.x API (works with lextudio fork pinned by manifest/const)
     from pysnmp.hlapi import (
         CommunityData,
         ObjectIdentity,
@@ -52,10 +48,6 @@ except Exception as exc:  # pragma: no cover
     _PYSNMP_IMPORT_ERR = exc
 
 
-# --------------------------
-# Back-compat helper shims (used by config_flow and earlier code)
-# --------------------------
-
 def ensure_snmp_available() -> None:
     if not _PYSNMP_IMPORT_OK:
         raise SnmpDependencyError(f"pysnmp.hlapi import failed: {_PYSNMP_IMPORT_ERR}")
@@ -66,11 +58,8 @@ def validate_environment_or_raise() -> None:
 
 
 def reset_backend_cache() -> None:
-    # Nothing to do for pysnmp; left for older code paths that import it
     return
 
-
-# --- MIB-II OIDs (vendor-agnostic) ---
 
 IF_TABLE = "1.3.6.1.2.1.2.2.1"
 IF_DESCR = IF_TABLE + ".2"
@@ -78,32 +67,25 @@ IF_TYPE = IF_TABLE + ".3"
 IF_ADMIN = IF_TABLE + ".7"
 IF_OPER = IF_TABLE + ".8"
 IF_LAST_CHANGE = IF_TABLE + ".9"
-IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"  # RFC2863 ifAlias
+IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 
-# IANA ifType values
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 IANA_IFTYPE_LAG = 161  # ieee8023adLag
 
-# IPv4 address table
 IP_ADDR_TABLE = "1.3.6.1.2.1.4.20.1"
 IP_AD_ENT_ADDR = IP_ADDR_TABLE + ".1"
 IP_AD_ENT_IFIDX = IP_ADDR_TABLE + ".2"
 IP_AD_ENT_NETMASK = IP_ADDR_TABLE + ".3"
 
-# System OIDs
 SYS_DESCR = "1.3.6.1.2.1.1.1.0"
 SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 SYS_NAME = "1.3.6.1.2.1.1.5.0"
 
 
 def _normalize_port_community(
-    port_in: Union[int, str, None],
-    community_in: Union[str, int, None],
+    port_in: Union[int, str, None], community_in: Union[str, int, None]
 ) -> Tuple[int, str]:
-    """Accept either (port, community) or (community, port); ports can be str."""
     default_port = 161
-
-    # If first arg looks like a community (non-digit string), treat it as such.
     if isinstance(port_in, str) and not port_in.isdigit():
         community = str(port_in)
         if isinstance(community_in, int):
@@ -114,7 +96,6 @@ def _normalize_port_community(
             port = default_port
         return int(port), community
 
-    # Otherwise, first arg is a port (int or digit-string) or None
     if isinstance(port_in, str) and port_in.isdigit():
         port = int(port_in)
     elif isinstance(port_in, int):
@@ -129,18 +110,13 @@ def _normalize_port_community(
 def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tuple[str, object]]:
     ensure_snmp_available()
     engine = SnmpEngine()
-    auth = CommunityData(community, mpModel=1)  # v2c
+    auth = CommunityData(community, mpModel=1)
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
     ctx = ContextData()
 
     out: List[Tuple[str, object]] = []
     for (err_ind, err_stat, err_idx, var_binds) in nextCmd(
-        engine,
-        auth,
-        target,
-        ctx,
-        ObjectType(ObjectIdentity(base_oid)),
-        lexicographicMode=False,
+        engine, auth, target, ctx, ObjectType(ObjectIdentity(base_oid)), lexicographicMode=False
     ):
         if err_ind:
             raise SnmpError(f"SNMP walk error: {err_ind}")
@@ -155,18 +131,13 @@ def _snmp_walk(host: str, port: int, community: str, base_oid: str) -> List[Tupl
 def _snmp_get(host: str, port: int, community: str, oid: str) -> Optional[str]:
     ensure_snmp_available()
     engine = SnmpEngine()
-    auth = CommunityData(community, mpModel=1)  # v2c
+    auth = CommunityData(community, mpModel=1)
     target = UdpTransportTarget((host, port), timeout=2, retries=1)
     ctx = ContextData()
-
     error_indication, error_status, error_index, var_binds = next(
         getCmd(engine, auth, target, ctx, ObjectType(ObjectIdentity(oid)))
     )
-    if error_indication:
-        _LOGGER.debug("SNMP GET %s error: %s", oid, error_indication)
-        return None
-    if error_status:
-        _LOGGER.debug("SNMP GET %s status: %s", oid, error_status.prettyPrint())
+    if error_indication or error_status:
         return None
     for vb in var_binds:
         return vb[1].prettyPrint()
@@ -181,7 +152,7 @@ def _mask_to_prefix(mask: str) -> Optional[int]:
 
 
 class SwitchSnmpClient:
-    """Tiny SNMP client tailored for the integration."""
+    """Minimal SNMP wrapper for the integration."""
 
     def __init__(
         self,
@@ -196,22 +167,14 @@ class SwitchSnmpClient:
         self._port = norm_port
         self._community = norm_comm
 
-    # ----- creation -----
     @classmethod
     async def async_create(
-        cls,
-        hass: HomeAssistant,
-        host: str,
-        port_or_comm,
-        comm_or_port=None,
+        cls, hass: HomeAssistant, host: str, port_or_comm, comm_or_port=None
     ) -> "SwitchSnmpClient":
-        """Accept both call styles: (port, community) or (community, port)."""
         await hass.async_add_executor_job(ensure_snmp_available)
 
-        # Detect which arg is which
         if isinstance(port_or_comm, str) and (
-            isinstance(comm_or_port, int)
-            or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
+            isinstance(comm_or_port, int) or (isinstance(comm_or_port, str) and comm_or_port.isdigit())
         ):
             community = port_or_comm
             port = comm_or_port
@@ -221,29 +184,25 @@ class SwitchSnmpClient:
 
         return cls(hass, host, port, community)
 
-    # run sync job on executor (works even if hass not set)
     async def _run(self, func, *args):
         if self._hass is not None:
             return await self._hass.async_add_executor_job(func, *args)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: func(*args))
 
-    # ----- system info for sensors -----
     async def async_get_system_info(self) -> Dict[str, Optional[str]]:
         def _read():
-            sys_descr = _snmp_get(self._host, self._port, self._community, SYS_DESCR) or ""
-            sys_uptime = _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or ""
-            sys_name = _snmp_get(self._host, self._port, self._community, SYS_NAME) or ""
-            return {"sysDescr": sys_descr, "sysUpTime": sys_uptime, "sysName": sys_name}
+            return {
+                "sysDescr": _snmp_get(self._host, self._port, self._community, SYS_DESCR) or "",
+                "sysUpTime": _snmp_get(self._host, self._port, self._community, SYS_UPTIME) or "",
+                "sysName": _snmp_get(self._host, self._port, self._community, SYS_NAME) or "",
+            }
 
         return await self._run(_read)
 
-    # ----- interface listing with IPv4 attribution -----
     async def async_get_interfaces(self) -> List[Dict]:
         """Return list of interface dicts with admin/oper/alias/descr/type + IPv4 info."""
-
         def _collect() -> List[Dict]:
-            # Walk ifTable essentials
             descr_rows = _snmp_walk(self._host, self._port, self._community, IF_DESCR)
             type_rows = _snmp_walk(self._host, self._port, self._community, IF_TYPE)
             admin_rows = _snmp_walk(self._host, self._port, self._community, IF_ADMIN)
@@ -258,50 +217,44 @@ class SwitchSnmpClient:
                     return None
 
             info: Dict[int, Dict] = {}
-
             for oid, val in descr_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
-                    info.setdefault(idx, {})["descr"] = val
-
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    info.setdefault(i, {})["descr"] = val
             for oid, val in type_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
+                i = _idx_from_oid(oid)
+                if i is not None:
                     try:
-                        info.setdefault(idx, {})["type"] = int(val)
+                        info.setdefault(i, {})["type"] = int(val)
                     except Exception:
-                        info.setdefault(idx, {})["type"] = None
-
+                        info.setdefault(i, {})["type"] = None
             for oid, val in admin_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
+                i = _idx_from_oid(oid)
+                if i is not None:
                     try:
-                        info.setdefault(idx, {})["admin"] = int(val)
+                        info.setdefault(i, {})["admin"] = int(val)
                     except Exception:
-                        info.setdefault(idx, {})["admin"] = None
-
+                        info.setdefault(i, {})["admin"] = None
             for oid, val in oper_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
+                i = _idx_from_oid(oid)
+                if i is not None:
                     try:
-                        info.setdefault(idx, {})["oper"] = int(val)
+                        info.setdefault(i, {})["oper"] = int(val)
                     except Exception:
-                        info.setdefault(idx, {})["oper"] = None
-
+                        info.setdefault(i, {})["oper"] = None
             for oid, val in alias_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
-                    info.setdefault(idx, {})["alias"] = val
-
+                i = _idx_from_oid(oid)
+                if i is not None:
+                    info.setdefault(i, {})["alias"] = val
             for oid, val in last_rows:
-                idx = _idx_from_oid(oid)
-                if idx is not None:
+                i = _idx_from_oid(oid)
+                if i is not None:
                     try:
-                        info.setdefault(idx, {})["last"] = int(val)
+                        info.setdefault(i, {})["last"] = int(val)
                     except Exception:
-                        info.setdefault(idx, {})["last"] = None
+                        info.setdefault(i, {})["last"] = None
 
-            # IPv4 ipAddrTable: map ifIndex -> list[(ip, mask, cidr)]
+            # IPv4 ipAddrTable
             ip_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_ADDR)
             ifidx_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_IFIDX)
             mask_rows = _snmp_walk(self._host, self._port, self._community, IP_AD_ENT_NETMASK)
@@ -309,25 +262,24 @@ class SwitchSnmpClient:
             ip_to_ifidx: Dict[str, int] = {}
             ip_to_mask: Dict[str, str] = {}
 
-            # ifIndex part is in the OID suffix (the dotted IP itself)
             for oid, val in ifidx_rows:
-                suffix_ip = oid.split(".")[-4:]
+                parts = oid.split(".")[-4:]
                 try:
-                    key = ".".join(str(int(x)) for x in suffix_ip)
+                    ip = ".".join(str(int(p)) for p in parts)
                 except Exception:
                     continue
                 try:
-                    ip_to_ifidx[key] = int(val)
+                    ip_to_ifidx[ip] = int(val)
                 except Exception:
                     continue
 
             for oid, mask in mask_rows:
-                suffix_ip = oid.split(".")[-4:]
+                parts = oid.split(".")[-4:]
                 try:
-                    key = ".".join(str(int(x)) for x in suffix_ip)
+                    ip = ".".join(str(int(p)) for p in parts)
                 except Exception:
                     continue
-                ip_to_mask[key] = mask
+                ip_to_mask[ip] = mask
 
             ip_map: Dict[int, List[Tuple[str, str, Optional[int]]]] = {}
             for _oid, ip_val in ip_rows:
@@ -339,34 +291,37 @@ class SwitchSnmpClient:
                 prefix = _mask_to_prefix(mask) if mask else None
                 ip_map.setdefault(idx, []).append((ip, mask, prefix))
 
-            # Build final rows + filter unconfigured PortChannels (heuristic)
+            # Build, filter: unconfigured LAGs and CPU interface (heuristic)
             out: List[Dict] = []
             for idx, row in info.items():
                 if_type = row.get("type")
+                descr = row.get("descr") or ""
                 alias = (row.get("alias") or "").strip()
                 last = row.get("last") or 0
                 has_ip = idx in ip_map
 
-                # Heuristic to drop unconfigured LAGs (no alias, no IP, never changed)
-                if if_type == IANA_IFTYPE_LAG and (not alias) and (not has_ip) and last == 0:
+                # drop unconfigured PortChannels
+                if if_type == IANA_IFTYPE_LAG and not alias and not has_ip and last == 0:
                     continue
 
-                port = {
-                    "index": idx,
-                    "descr": row.get("descr") or "",
-                    "alias": alias,
-                    "admin": row.get("admin"),
-                    "oper": row.get("oper"),
-                    "type": if_type,
-                    "ips": ip_map.get(idx, []),  # list of (ip, mask, prefix)
-                }
-                out.append(port)
+                # drop CPU interface (common pattern: descr contains 'CPU' and has no IP/alias)
+                if ("cpu" in descr.lower()) and not alias and not has_ip:
+                    continue
 
+                out.append(
+                    {
+                        "index": idx,
+                        "descr": descr,
+                        "alias": alias,
+                        "admin": row.get("admin"),
+                        "oper": row.get("oper"),
+                        "type": if_type,
+                        "ips": ip_map.get(idx, []),  # [(ip, mask, prefix)]
+                    }
+                )
             return out
 
         return await self._run(_collect)
 
-    # ----- compatibility alias for existing __init__.py -----
     async def async_get_port_data(self) -> List[Dict]:
-        """Backward-compatible name expected by __init__.py."""
         return await self.async_get_interfaces()
