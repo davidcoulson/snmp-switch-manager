@@ -13,8 +13,6 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
-# -------------------- helpers --------------------
-
 def _resolve_coordinator(hass, entry):
     """Return the DataUpdateCoordinator regardless of storage shape."""
     dom: Dict[str, Any] | None = hass.data.get(DOMAIN)
@@ -58,34 +56,40 @@ def _resolve_coordinator(hass, entry):
     raise KeyError(entry.entry_id)
 
 
-def _short_intf_name(long_name: str) -> str | None:
+def _short_intf_name(long_name: str, alias: str) -> str | None:
     """
-    Convert long ifDescr to short Cisco-style names:
+    Convert long ifDescr to short names:
 
-      'Unit: 1 Slot: 0 Port: 46 Gigabit - Level' -> 'Gi1/0/46'
-      'Unit: 1 Slot: 1 Port: 2 10G'              -> 'Te1/1/2'
-      'Vlan 11' / 'VLAN11'                       -> 'Vl11'
+      'Vlan 11' / 'VLAN11'                -> 'Vl11'
+      'Unit: 1 Slot: 0 Port: 46 Gigabit' -> 'Gi1/0/46'
+      'Unit: 1 Slot: 0 Port: 1 20G'      -> 'Tw1/0/1'   (20G stacking)
+      'Unit: 1 Slot: 1 Port: 2 10G'      -> 'Te1/1/2'
     """
     text = long_name or ""
+    alt  = alias or ""
 
-    # VLANs
-    mv = re.search(r"\bV(?:lan)?\s*([0-9]+)\b", text, re.IGNORECASE)
-    if mv:
-        return f"Vl{int(mv.group(1))}"
+    # VLANs – try name first, then alias
+    for candidate in (text, alt):
+        mv = re.search(r"\bV(?:lan)?\s*([0-9]+)\b", candidate, re.IGNORECASE)
+        if mv:
+            return f"Vl{int(mv.group(1))}"
 
-    # Physical ports "Unit: X Slot: Y Port: Z <type>"
+    # Physical form "Unit: X Slot: Y Port: Z <type>"
     m = re.search(r"Unit:\s*(\d+)\s+Slot:\s*(\d+)\s+Port:\s*(\d+)\s+(.*)", text)
     if not m:
         return None
     unit, slot, port, tail = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
 
-    itype = "Gi"  # default to Gigabit
     t = tail.lower()
-    if "10g" in t or "tengig" in t or "ten-gig" in t or "ten gig" in t:
+    # 20G stacking ports -> Tw (per your request)
+    if "20g" in t or "20 g" in t:
+        itype = "Tw"
+    elif "10g" in t or "ten" in t or "tengig" in t or "ten-gig" in t or "ten gig" in t:
         itype = "Te"
     elif "fast" in t or "100m" in t:
         itype = "Fa"
-    elif "gigabit" in t or "1g" in t:
+    else:
+        # Default to Gigabit for anything else mentioning 1G/gigabit/level text
         itype = "Gi"
 
     return f"{itype}{unit}/{slot}/{port}"
@@ -94,8 +98,7 @@ def _short_intf_name(long_name: str) -> str | None:
 def _cidr_from_addr_mask(addr: str, mask: str) -> str | None:
     try:
         prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
-        ip = ipaddress.IPv4Address(addr)
-        return f"{ip}/{prefix}"
+        return f"{ipaddress.IPv4Address(addr)}/{prefix}"
     except Exception:
         return None
 
@@ -112,28 +115,24 @@ def _should_exclude(name: str, alias: str, include: List[str], exclude: List[str
     if "cpu" in text or "software loopback" in text or text.startswith("link aggregate"):
         return True
 
-    if include:
-        if not any(pat.lower() in text for pat in include):
-            return True
-    if exclude:
-        if any(pat.lower() in text for pat in exclude):
-            return True
+    if include and not any(pat.lower() in text for pat in include):
+        return True
+    if exclude and any(pat.lower() in text for pat in exclude):
+        return True
 
     return False
 
-
-# ----------------- platform setup -----------------
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up Switch Manager port switches."""
     coordinator = _resolve_coordinator(hass, entry)
     ports = coordinator.data.get("ports", {})
 
-    # Parse include/exclude options (comma-separated)
+    # Include/Exclude (comma-separated) from Options
     include_opt = (entry.options.get("include") or "").strip()
     exclude_opt = (entry.options.get("exclude") or "").strip()
     include = [s.strip() for s in include_opt.split(",") if s.strip()] if include_opt else []
-    exclude = [s.strip() for s in exclude_opt.split(",") if s.strip()] if exclude_opt else []
+    exclude = [s.strip() for s in exclude_opt.split(",") if exclude_opt else []]
 
     entities: list[SwitchManagerPort] = []
     iterable = ports.values() if isinstance(ports, dict) else ports
@@ -153,13 +152,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         if _should_exclude(name, alias, include, exclude):
             continue
 
-        short = _short_intf_name(name)
-        if short:
-            friendly = short
-        else:
-            # Fallbacks: VLAN with ifIndex-only naming (e.g., "Port 790" -> VlX if alias says Vlan)
-            mv = re.search(r"\bV(?:lan)?\s*([0-9]+)\b", alias, re.IGNORECASE)
-            friendly = f"Vl{int(mv.group(1))}" if mv else (alias or f"Port {idx}")
+        short = _short_intf_name(name, alias)
+        friendly = short or (alias if alias else f"Port {idx}")
 
         entities.append(SwitchManagerPort(coordinator, entry, idx, friendly))
 
@@ -211,7 +205,6 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             _LOGGER.error("No SNMP client available for port %s", self._port_index)
             return
         try:
-            # ifAdminStatus.<index> = up(1)
             await client.async_set_octet_string(
                 f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 1
             )
@@ -226,13 +219,25 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             _LOGGER.error("No SNMP client available for port %s", self._port_index)
             return
         try:
-            # ifAdminStatus.<index> = down(2)
             await client.async_set_octet_string(
                 f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 2
             )
             await self.coordinator.async_request_refresh()
         except Exception as err:
             _LOGGER.error("Failed to disable port %s: %s", self._port_index, err)
+
+    @staticmethod
+    def _cidrs_from_ipv4_list(records: List[Dict[str, str]]) -> List[str]:
+        out: List[str] = []
+        for rec in records or []:
+            addr = str(rec.get("address", ""))
+            mask = str(rec.get("netmask", ""))
+            try:
+                prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+                out.append(f"{ipaddress.IPv4Address(addr)}/{prefix}")
+            except Exception:
+                continue
+        return out
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -253,23 +258,17 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             })
 
             ipv4 = port.get("ipv4") or []
-            if ipv4:
-                cidrs: List[str] = []
-                for rec in ipv4:
-                    cidr = _cidr_from_addr_mask(str(rec.get("address", "")), str(rec.get("netmask", "")))
-                    if cidr:
-                        cidrs.append(cidr)
-                if cidrs:
-                    attrs["ip_cidr_primary"] = cidrs[0]
-                    attrs["ipv4_cidrs"] = cidrs
-                # Keep individual fields for backwards compatibility
-                attrs["ip_address"] = ipv4[0].get("address")
-                attrs["netmask"] = ipv4[0].get("netmask")
+            cidrs = self._cidrs_from_ipv4_list(ipv4)
+            if cidrs:
+                attrs["ip_cidr_primary"] = cidrs[0]
+                attrs["ipv4_cidrs"] = cidrs
+                # keep first address/mask for simple UIs
+                attrs["ip_address"] = (ipv4[0] or {}).get("address")
+                attrs["netmask"] = (ipv4[0] or {}).get("netmask")
 
         # System-level attrs
         if sysinfo:
             attrs.setdefault("hostname", sysinfo.get("hostname"))
-            # Friendly uptime string if present; keep seconds if available
             if "uptime_seconds" in sysinfo:
                 attrs.setdefault("uptime_seconds", sysinfo.get("uptime_seconds"))
             if "uptime" in sysinfo:
