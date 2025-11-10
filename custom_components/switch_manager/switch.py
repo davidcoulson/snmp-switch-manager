@@ -16,33 +16,48 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_coordinator(hass: HomeAssistant, entry: ConfigEntry):
+    """Cope with both the new dict layout and the older flat mapping."""
     dom = hass.data.get(DOMAIN) or {}
+
+    # Newer layout used by our __init__.py: hass.data[DOMAIN]["entries"][entry_id]
     node = (dom.get("entries") or {}).get(entry.entry_id)
     if isinstance(node, dict) and "coordinator" in node:
         return node["coordinator"]
+
+    # Older fallback: hass.data[DOMAIN][entry_id]
     node = dom.get(entry.entry_id)
     if isinstance(node, dict) and "coordinator" in node:
         return node["coordinator"]
+
     _LOGGER.error(
         "Could not resolve coordinator for entry_id=%s; hass.data keys: %s; node=%s; runtime_data=%s",
-        entry.entry_id, list(dom.keys()), node, dom.get("entries"),
+        entry.entry_id,
+        list(dom.keys()),
+        node,
+        dom.get("entries"),
     )
     raise KeyError(entry.entry_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
     coordinator = _resolve_coordinator(hass, entry)
+
     data = coordinator.data or {}
     ports: List[Dict[str, Any]] = data.get("ports") or []
     if not ports:
         await coordinator.async_request_refresh()
         ports = (coordinator.data or {}).get("ports") or []
 
-    entities: List[SwitchManagerPort] = [SwitchManagerPort(coordinator, entry, port_dict=p) for p in ports if p.get("index") is not None]
+    entities: List[SwitchManagerPort] = [
+        SwitchManagerPort(coordinator, entry, port_dict=p)
+        for p in ports
+        if p.get("index") is not None
+    ]
     async_add_entities(entities)
 
 
 def _friendly_name_from_descr(descr: str) -> Optional[str]:
+    """Translate the raw ifDescr into Gi/Te/Tw formatting (Dell-style)."""
     try:
         unit = slot = port = None
         if "Unit:" in descr:
@@ -58,7 +73,7 @@ def _friendly_name_from_descr(descr: str) -> Optional[str]:
         if " 10g" in dlow:
             t = "Te"
         elif " 20g" in dlow:
-            t = "Tw"
+            t = "Tw"  # stacking twinax shown as 20G on some devices
         elif " gigabit" in dlow:
             t = "Gi"
 
@@ -80,24 +95,40 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
         descr = port_dict.get("descr") or ""
         idx = port_dict.get("index")
 
+        # Prefer Gi/Te/Tw if we can derive it
         name = _friendly_name_from_descr(descr)
 
-        # VLAN naming (prefer alias like Vl11, else parse descr token)
+        # VLAN naming:
+        #   - Use alias if it already looks like "VlX"
+        #   - Otherwise, if descr itself already is something like "VlX", use it as-is
+        #   - Else, if descr contains 'vlan <num>' create "Vl<num>"
         if not name:
             alias = (port_dict.get("alias") or "").strip()
+            dlow = descr.lower()
+
             if alias and alias.upper().startswith("VL"):
                 name = alias.upper()
-            elif "VLAN" in descr.upper():
-                # pull "VlX" if present
-                toks = [t for t in descr.replace("/", " ").split() if t.upper().startswith("VL")]
-                if toks:
-                    name = toks[0].upper()
+            elif descr.strip().lower().startswith("vl"):
+                name = descr.strip()
+            elif "vlan" in dlow:
+                # Find the first integer token after 'vlan'
+                parts = dlow.replace("/", " ").split()
+                try:
+                    vi = parts.index("vlan")
+                    # consume next token that is numeric
+                    for tok in parts[vi + 1 : vi + 4]:
+                        if tok.isdigit():
+                            name = f"Vl{int(tok)}"
+                            break
+                except Exception:
+                    pass
 
-        # Loopback
+        # Loopback naming
         if not name and port_dict.get("type") == IANA_IFTYPE_SOFTWARE_LOOPBACK:
             name = "Lo0"
 
         self._name = name or f"Port {idx}"
+
         self._attr_unique_id = f"{self._entry.entry_id}_port_{idx}"
         self._attr_name = self._name
 
@@ -107,6 +138,8 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
             name=str(sys_name),
         )
 
+    # ---- SwitchEntity impl ----
+
     @property
     def is_on(self) -> bool:
         admin = self._port.get("admin")
@@ -115,27 +148,34 @@ class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
         return bool(self._port.get("oper") == 1)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        # SNMP write for admin up would go here when implemented
         return
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        # SNMP write for admin down would go here when implemented
         return
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose per-interface details only (no device-wide fields)."""
         attrs: Dict[str, Any] = {}
+
         attrs["Index"] = self._port.get("index")
         attrs["Name"] = self._port.get("descr") or ""
+
         alias = (self._port.get("alias") or "").strip()
         if alias:
             attrs["Alias"] = alias
+
         if self._port.get("admin") is not None:
             attrs["Admin"] = self._port.get("admin")
         if self._port.get("oper") is not None:
             attrs["Oper"] = self._port.get("oper")
 
-        # IPv4 details if available
+        # IPv4 details if available (any L3 interface: VLAN, Loopback, PortChannel with SVI)
         ips = self._port.get("ips") or []
         if ips:
+            # take the first assigned IPv4 (most devices have at most one)
             ip, mask, prefix = ips[0]
             if ip:
                 attrs["IP address"] = ip
