@@ -1,132 +1,94 @@
-"""Switch platform for Switch Manager integration."""
 from __future__ import annotations
 
-from typing import Any
-
+import logging
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    ATTR_ADMIN_STATUS,
-    ATTR_DESCRIPTION,
-    ATTR_OPER_STATUS,
-    ATTR_PORT,
-    ATTR_SPEED,
-    DOMAIN,
-)
-from . import SwitchCoordinator
+from .const import DOMAIN
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
-) -> None:
-    data = hass.data[DOMAIN]["entries"][entry.entry_id]
-    coordinator: SwitchCoordinator = data["coordinator"]
+_LOGGER = logging.getLogger(__name__)
+
+
+async def async_setup_entry(hass, entry, async_add_entities):
+    """Set up Switch Manager port switches."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    ports = coordinator.data.get("ports", {})
 
     entities: list[SwitchManagerPort] = []
-    for port in coordinator.data.get("ports", []):
-        entities.append(SwitchManagerPort(coordinator, entry, port["index"]))
+
+    # Accept both dict[int, dict] and list[dict] or list[int]
+    if isinstance(ports, dict):
+        iterable = ports.values()
+    else:
+        iterable = ports
+
+    for port in iterable:
+        if isinstance(port, dict):
+            idx = port.get("index") or port.get("ifIndex") or 0
+        else:
+            idx = int(port)
+        entities.append(SwitchManagerPort(coordinator, entry, idx))
 
     async_add_entities(entities)
 
 
-class SwitchManagerPort(CoordinatorEntity[SwitchCoordinator], SwitchEntity):
-    """Representation of a switch port as a Home Assistant Switch entity."""
+class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
+    """Representation of a network switch port."""
 
     _attr_should_poll = False
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:ethernet"
 
-    def __init__(self, coordinator: SwitchCoordinator, entry: ConfigEntry, index: int) -> None:
+    def __init__(self, coordinator, entry, port_index: int):
+        """Initialize the switch port entity."""
         super().__init__(coordinator)
-        self.entry = entry
-        self.index = index
-        self._attr_unique_id = f"{entry.entry_id}:{index}"
-        self._attr_name = f"Port {index}"
-        self._identifier = (DOMAIN, entry.entry_id)
-        self._configuration_url = f"snmp://{entry.data[CONF_HOST]}"
+        self._entry = entry
+        self._port_index = port_index
+        self._attr_unique_id = f"{entry.entry_id}_{port_index}"
+        self._attr_name = f"Port {port_index}"
 
     @property
     def is_on(self) -> bool:
-        port = self._port_data
-        return port and port[ATTR_ADMIN_STATUS] == "1"
+        """Return True if port is administratively up."""
+        ports = self.coordinator.data.get("ports", {})
+        port = ports.get(self._port_index)
+        if isinstance(port, dict):
+            admin = port.get("admin")
+            oper = port.get("oper")
+            return admin == 1 and oper == 1
+        return False
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Enable the switch port."""
+        client = self.coordinator.client
+        try:
+            await client.async_set_octet_string(
+                f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 1
+            )  # ifAdminStatus.1 = up(1)
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("Failed to enable port %s: %s", self._port_index, err)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Disable the switch port."""
+        client = self.coordinator.client
+        try:
+            await client.async_set_octet_string(
+                f"1.3.6.1.2.1.2.2.1.7.{self._port_index}", 2
+            )  # ifAdminStatus.1 = down(2)
+            await self.coordinator.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error("Failed to disable port %s: %s", self._port_index, err)
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        port = self._port_data
-        if not port:
+    def extra_state_attributes(self) -> dict[str, str | int]:
+        """Expose additional port attributes."""
+        ports = self.coordinator.data.get("ports", {})
+        port = ports.get(self._port_index)
+        if not isinstance(port, dict):
             return {}
         return {
-            ATTR_PORT: port["index"],
-            ATTR_DESCRIPTION: port.get("description"),
-            ATTR_SPEED: _format_speed(port.get("speed")),
-            ATTR_ADMIN_STATUS: _decode_status(port.get("admin_status")),
-            ATTR_OPER_STATUS: _decode_status(port.get("oper_status")),
+            "name": port.get("name"),
+            "alias": port.get("alias"),
+            "admin": port.get("admin"),
+            "oper": port.get("oper"),
+            "index": port.get("index"),
         }
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._port_data is not None
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        info = self.coordinator.data.get("device_info", {}) if self.coordinator.data else {}
-        manufacturer = info.get("manufacturer")
-        model = info.get("model")
-        firmware = info.get("firmware")
-        name = info.get("name") or self.entry.title
-
-        return DeviceInfo(
-            identifiers={self._identifier},
-            manufacturer=manufacturer,
-            model=model,
-            sw_version=firmware,
-            name=name,
-            configuration_url=self._configuration_url,
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_admin_state(self.index, True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.async_set_admin_state(self.index, False)
-
-    @property
-    def _port_data(self) -> dict[str, Any] | None:
-        for port in self.coordinator.data.get("ports", []):
-            if port["index"] == self.index:
-                return port
-        return None
-
-
-def _decode_status(value: str | None) -> str | None:
-    mapping = {
-        "1": "up",
-        "2": "down",
-        "3": "testing",
-        "4": "unknown",
-        "5": "dormant",
-        "6": "notPresent",
-        "7": "lowerLayerDown",
-    }
-    return mapping.get(value or "")
-
-
-def _format_speed(value: str | None) -> str | None:
-    if not value:
-        return None
-    try:
-        bps = int(value)
-    except (TypeError, ValueError):
-        return value
-    if bps >= 1_000_000_000:
-        return f"{bps / 1_000_000_000:.1f} Gbps"
-    if bps >= 1_000_000:
-        return f"{bps / 1_000_000:.1f} Mbps"
-    if bps >= 1_000:
-        return f"{bps / 1_000:.1f} Kbps"
-    return f"{bps} bps"
