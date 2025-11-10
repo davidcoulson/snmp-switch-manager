@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import logging
 import re
-from typing import Iterable, Tuple, Any, Optional, Dict
+from typing import Iterable, Tuple, Any, Optional, Dict, List
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -193,6 +193,11 @@ class SwitchSnmpClient:
     OID_sysName        = "1.3.6.1.2.1.1.5.0"
     OID_sysLocation    = "1.3.6.1.2.1.1.6.0"
 
+    # IP-MIB (IPv4 classic table)
+    OID_ipAdEntAddr    = "1.3.6.1.2.1.4.20.1.1"
+    OID_ipAdEntIfIndex = "1.3.6.1.2.1.4.20.1.2"
+    OID_ipAdEntNetMask = "1.3.6.1.2.1.4.20.1.3"
+
     def __init__(self, hass, host: str, community: str, port: int = 161) -> None:
         self._hass = hass  # may be None
         self._host = host
@@ -218,10 +223,8 @@ class SwitchSnmpClient:
         if not args:
             raise SnmpError("async_create requires arguments")
 
-        # Case 1: first arg looks like hass (has async_add_executor_job)
         first = args[0]
         if hasattr(first, "async_add_executor_job"):
-            # (hass, host, community, port?)
             hass = first
             try:
                 host = args[1]
@@ -230,7 +233,6 @@ class SwitchSnmpClient:
             except Exception as e:
                 raise SnmpError(f"async_create(hass, host, community, port) invalid: {e}")
         else:
-            # (host, community, port?, hass?)
             try:
                 host = args[0]
                 community = args[1]
@@ -239,7 +241,6 @@ class SwitchSnmpClient:
             except Exception as e:
                 raise SnmpError(f"async_create(host, community, port[, hass]) invalid: {e}")
 
-        # Ensure dependency without blocking the loop
         if hass is not None:
             await hass.async_add_executor_job(ensure_snmp_available)
         else:
@@ -287,29 +288,33 @@ class SwitchSnmpClient:
 
     # ---- High-level helpers expected by coordinator --------------------------
 
+    def _get_ipv4_table(self) -> Dict[int, List[Dict[str, str]]]:
+        """
+        Build { ifIndex: [ {address, netmask}, ... ] } from IP-MIB ipAddrTable.
+        """
+        by_addr_if = {str(addr): int(idx) for addr, idx in self.walk(self.OID_ipAdEntIfIndex)}
+        by_addr_mask = {str(addr): str(mask) for addr, mask in self.walk(self.OID_ipAdEntNetMask)}
+        result: Dict[int, List[Dict[str, str]]] = {}
+        for addr, ifindex in by_addr_if.items():
+            result.setdefault(ifindex, []).append({
+                "address": addr,
+                "netmask": by_addr_mask.get(addr, ""),
+            })
+        return result
+
     def get_port_data(self) -> Dict[int, Dict[str, Any]]:
         """
-        Gather port data from IF-MIB.
+        Gather port data from IF-MIB and merge IPv4 addresses where present.
 
-        Returns:
-          {
-            <ifIndex>: {
-              "index": int,
-              "name": str,        # ifDescr
-              "admin": int,       # ifAdminStatus (1=up,2=down,3=testing)
-              "oper": int,        # ifOperStatus
-              "alias": str        # ifAlias (port description)
-            },
-            ...
-          }
+        Returns dict keyed by ifIndex with fields: index,name,admin,oper,alias,ipv4(list)
         """
-        # Walk individual tables then merge by ifIndex
         descr = {int(oid.split(".")[-1]): str(val) for oid, val in self.walk(self.OID_ifDescr)}
         admin = {int(oid.split(".")[-1]): int(val) for oid, val in self.walk(self.OID_ifAdminStatus)}
         oper  = {int(oid.split(".")[-1]): int(val) for oid, val in self.walk(self.OID_ifOperStatus)}
         alias = {int(oid.split(".")[-1]): str(val) for oid, val in self.walk(self.OID_ifAlias)}
+        ipv4  = self._get_ipv4_table()
 
-        indices = set(descr) | set(admin) | set(oper) | set(alias)
+        indices = set(descr) | set(admin) | set(oper) | set(alias) | set(ipv4)
         out: Dict[int, Dict[str, Any]] = {}
         for idx in sorted(indices):
             out[idx] = {
@@ -318,6 +323,7 @@ class SwitchSnmpClient:
                 "admin": admin.get(idx, 0),
                 "oper": oper.get(idx, 0),
                 "alias": alias.get(idx, ""),
+                "ipv4": ipv4.get(idx, []),
             }
         return out
 
@@ -331,20 +337,14 @@ class SwitchSnmpClient:
 
     @staticmethod
     def _parse_sys_fields(sys_descr: str, sys_object_id: str) -> Dict[str, str]:
-        """
-        Best-effort parsing for manufacturer/model/firmware from sysDescr/sysObjectID.
-
-        Keeps values empty on unknowns so the UI still renders device info.
-        """
+        """Best-effort parsing for manufacturer/model/firmware."""
         manufacturer = ""
         model = ""
         firmware = ""
 
-        # Manufacturer (Dell enterprise OID prefix + text heuristic)
         if sys_object_id.startswith("1.3.6.1.4.1.674.") or "Dell" in sys_descr:
             manufacturer = "Dell"
 
-        # Model (Dell N-series like N3048EP etc or first ALLCAPS+digits token)
         m = re.search(r"\b(N\d{3,4}[A-Z]*\b)", sys_descr)
         if m:
             model = m.group(1)
@@ -353,38 +353,20 @@ class SwitchSnmpClient:
             if m2:
                 model = m2.group(1)
 
-        # Firmware/version (first x.y or x.y.z or x.y.z.w pattern)
         v = re.search(r"\b\d+\.\d+(?:\.\d+){0,2}\b", sys_descr)
         if v:
             firmware = v.group(0)
 
-        return {
-            "manufacturer": manufacturer,
-            "model": model,
-            "firmware": firmware,
-        }
+        return {"manufacturer": manufacturer, "model": model, "firmware": firmware}
 
     def get_system_info(self) -> Dict[str, Any]:
         """
         Collect basic system info.
-
-        Returns:
-          {
-            "manufacturer": str,
-            "model": str,
-            "firmware": str,
-            "hostname": str,
-            "uptime_seconds": int,
-            "uptime_ticks": int,
-            "sys_descr": str,
-            "sys_object_id": str
-          }
         """
         sys_descr = str(self.get(self.OID_sysDescr))
         sys_object_id = str(self.get(self.OID_sysObjectID))
         sys_name = str(self.get(self.OID_sysName))
-        # sysUpTime is hundredths of a second
-        uptime_ticks = int(self.get(self.OID_sysUpTime))
+        uptime_ticks = int(self.get(self.OID_sysUpTime))  # hundredths
         uptime_seconds = int(uptime_ticks // 100)
 
         fields = self._parse_sys_fields(sys_descr, sys_object_id)
