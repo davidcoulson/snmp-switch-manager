@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import timedelta
@@ -13,7 +12,8 @@ from .snmp import SwitchSnmpClient
 
 _LOGGER = logging.getLogger(__name__)
 
-type SwitchManagerConfigEntry = ConfigEntry
+# Use standard aliasing compatible with Python <3.12
+SwitchManagerConfigEntry = ConfigEntry
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
@@ -64,25 +64,15 @@ async def async_register_services(hass: HomeAssistant):
         if not ent:
             return
 
-        # Resolve platform entity object to access if_index
-        for platform in hass.data.get("entity_platforms", []):
-            pass  # not used, HA helper below
-
-        # Look up entity object via hass.states
-        state = hass.states.get(entity_id)
-        if not state:
-            return
-
-        # Entities created by this integration expose a hidden attribute "_if_index" via registry_id
+        # Resolve the integration entry and client from the entity's config_entry_id
         entry_id = ent.config_entry_id
-        data = hass.data[DOMAIN][entry_id]
-        client = data["client"]
-
-        # Parse if_index from unique_id pattern "<entry>-if-<index>"
-        unique_id = ent.unique_id or ""
-        if unique_id.endswith(")"):
-            # not expected
+        data = hass.data.get(DOMAIN, {}).get(entry_id)
+        if not data:
             return
+
+        client = data["client"]
+        # Parse if_index from our unique_id pattern "<entry_id>-if-<index>"
+        unique_id = ent.unique_id or ""
         try:
             if_index = int(unique_id.split("-if-")[-1])
         except Exception:
