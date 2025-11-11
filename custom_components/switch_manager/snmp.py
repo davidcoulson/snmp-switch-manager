@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Iterable, Tuple
 
 from homeassistant.core import HomeAssistant
 
-# Use synchronous HLAPI (no dependency change) and offload to executor.
+# Use synchronous HLAPI (stable across HA Python versions) and run in executor
 from pysnmp.hlapi import (  # type: ignore[import]
     CommunityData,
     SnmpEngine,
@@ -32,13 +32,26 @@ from .const import (
     OID_ipAdEntAddr,
     OID_ipAdEntIfIndex,
     OID_ipAdEntNetMask,
-    OID_entPhysicalModelName,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
+# --- Fallback OIDs kept local (no other files touched) ---
+_OID_ipAddressAddr = "1.3.6.1.2.1.4.34.1.2"            # OCTET STRING (IPv4 only when 4 bytes)
+_OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"         # Integer (ifIndex)
+_OID_ipCidrRoutePrefixLength = "1.3.6.1.2.1.4.24.4.1.3"  # Integer (bits)
+_OID_ipCidrRouteIfIndex      = "1.3.6.1.2.1.4.24.4.1.7"  # Integer (ifIndex)
 
-def _do_get_one(engine, community, target, context, oid: str) -> Optional[str]:
+
+# ------------------ low-level sync helpers ------------------
+
+def _do_get_one(
+    engine: SnmpEngine,
+    community: CommunityData,
+    target: UdpTransportTarget,
+    context: ContextData,
+    oid: str,
+) -> Optional[str]:
     it = getCmd(engine, community, target, context, ObjectType(ObjectIdentity(oid)))
     err_ind, err_stat, err_idx, vbs = next(it)
     if err_ind or err_stat:
@@ -46,7 +59,13 @@ def _do_get_one(engine, community, target, context, oid: str) -> Optional[str]:
     return str(vbs[0][1])
 
 
-def _do_next_walk(engine, community, target, context, base_oid: str) -> Iterable[Tuple[str, Any]]:
+def _do_next_walk(
+    engine: SnmpEngine,
+    community: CommunityData,
+    target: UdpTransportTarget,
+    context: ContextData,
+    base_oid: str,
+) -> Iterable[Tuple[str, Any]]:
     it = nextCmd(
         engine,
         community,
@@ -63,7 +82,14 @@ def _do_next_walk(engine, community, target, context, base_oid: str) -> Iterable
             yield str(oid_obj), val
 
 
-def _do_set_alias(engine, community, target, context, if_index: int, alias: str) -> bool:
+def _do_set_alias(
+    engine: SnmpEngine,
+    community: CommunityData,
+    target: UdpTransportTarget,
+    context: ContextData,
+    if_index: int,
+    alias: str,
+) -> bool:
     it = setCmd(
         engine,
         community,
@@ -75,7 +101,14 @@ def _do_set_alias(engine, community, target, context, if_index: int, alias: str)
     return (not err_ind) and (not err_stat)
 
 
-def _do_set_admin_status(engine, community, target, context, if_index: int, value: int) -> bool:
+def _do_set_admin_status(
+    engine: SnmpEngine,
+    community: CommunityData,
+    target: UdpTransportTarget,
+    context: ContextData,
+    if_index: int,
+    value: int,
+) -> bool:
     it = setCmd(
         engine,
         community,
@@ -87,8 +120,37 @@ def _do_set_admin_status(engine, community, target, context, if_index: int, valu
     return (not err_ind) and (not err_stat)
 
 
+# ------------------ small utils ------------------
+
+def _octets_to_ipv4(val: Any) -> Optional[str]:
+    """Try to coerce an OCTET STRING to dotted IPv4 (expects exactly 4 bytes)."""
+    try:
+        bs = bytes(val)
+    except Exception:
+        try:
+            bs = val.asOctets()  # type: ignore[attr-defined]
+        except Exception:
+            s = str(val)
+            return s if s.count(".") == 3 else None
+    if len(bs) == 4:
+        return ".".join(str(b) for b in bs)
+    return None
+
+
+def _bits_to_mask(bits: int) -> str:
+    """Convert CIDR bits (0..32) to dotted mask."""
+    if bits <= 0:
+        return "0.0.0.0"
+    if bits >= 32:
+        return "255.255.255.255"
+    mask = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
+    return ".".join(str((mask >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+
+# ------------------ client ------------------
+
 class SwitchSnmpClient:
-    """SNMP client using sync HLAPI in an executor; exposes async interface."""
+    """SNMP client that exposes async methods by offloading sync pysnmp calls to a thread."""
 
     def __init__(self, hass: HomeAssistant, host: str, community: str, port: int) -> None:
         self.hass = hass
@@ -105,59 +167,21 @@ class SwitchSnmpClient:
             "sysDescr": None,
             "sysName": None,
             "sysUpTime": None,
-            "ifTable": {},
-            "ipIndex": {},
-            "ipMask": {},
-            # parsed fields for diagnostics:
-            "manufacturer": None,
-            "model": None,
-            "firmware": None,
+            "ifTable": {},     # index -> dict
+            "ipIndex": {},     # ip -> ifIndex
+            "ipMask": {},      # ip -> dotted mask
         }
 
     async def async_initialize(self) -> None:
         self.cache["sysDescr"] = await self._async_get_one(OID_sysDescr)
         self.cache["sysName"] = await self._async_get_one(OID_sysName)
         self.cache["sysUpTime"] = await self._async_get_one(OID_sysUpTime)
-
-        # Pull model from ENTITY-MIB if available (pick a base chassis entry).
-        # We take the first non-empty value from the column walk.
-        ent_models = await self._async_walk(OID_entPhysicalModelName)
-        model_hint = None
-        for _oid, val in ent_models:
-            s = str(val).strip()
-            if s:
-                model_hint = s
-                break
-        self.cache["model"] = model_hint
-
-        # Parse Manufacturer & Firmware Revision per your example line:
-        # sysDescr: "Dell EMC Networking N3048EP-ON, 6.7.1.31, Linux 4.14.174, v1.0.5"
-        sd = (self.cache.get("sysDescr") or "").strip()
-        manufacturer = None
-        firmware = None
-        if sd:
-            parts = [p.strip() for p in sd.split(",")]
-            # Firmware revision is the first comma-separated item after <vendor> <model>
-            if len(parts) >= 2:
-                firmware = parts[1] or None
-            # Manufacturer is the <vendor> portion before the model token
-            head = parts[0]
-            if model_hint and model_hint in head:
-                manufacturer = head.replace(model_hint, "").strip()
-            else:
-                # Fallback: drop last token in head (assume it's the model)
-                toks = head.split()
-                if len(toks) > 1:
-                    manufacturer = " ".join(toks[:-1])
-        self.cache["manufacturer"] = manufacturer
-        self.cache["firmware"] = firmware
-
-        await self._async_walk_interfaces()
-        await self._async_walk_ipv4()
+        await self._walk_interfaces()
+        await self._walk_ipv4()
 
     async def async_poll(self) -> Dict[str, Any]:
-        await self._async_walk_interfaces(dynamic_only=True)
-        await self._async_walk_ipv4()
+        await self._walk_interfaces(dynamic_only=True)
+        await self._walk_ipv4()
         return self.cache
 
     # ---------- async wrappers over sync calls ----------
@@ -172,78 +196,8 @@ class SwitchSnmpClient:
             return list(_do_next_walk(self.engine, self.community_data, self.target, self.context, base_oid))
         return await self.hass.async_add_executor_job(_collect)
 
-    async def _async_walk_interfaces(self, dynamic_only: bool = False) -> None:
+    # ---------- walkers ----------
+
+    async def _walk_interfaces(self, dynamic_only: bool = False) -> None:
         if not dynamic_only:
-            self.cache["ifTable"] = {}
-
-            for oid, val in await self._async_walk(OID_ifIndex):
-                idx = int(str(val))
-                self.cache["ifTable"][idx] = {"index": idx}
-
-            for oid, val in await self._async_walk(OID_ifDescr):
-                idx = int(oid.split(".")[-1])
-                self.cache["ifTable"].setdefault(idx, {})["descr"] = str(val)
-
-            for oid, val in await self._async_walk(OID_ifName):
-                idx = int(oid.split(".")[-1])
-                self.cache["ifTable"].setdefault(idx, {})["name"] = str(val)
-
-            for oid, val in await self._async_walk(OID_ifAlias):
-                idx = int(oid.split(".")[-1])
-                self.cache["ifTable"].setdefault(idx, {})["alias"] = str(val)
-
-        for oid, val in await self._async_walk(OID_ifAdminStatus):
-            idx = int(oid.split(".")[-1])
-            self.cache["ifTable"].setdefault(idx, {})["admin"] = int(val)
-
-        for oid, val in await self._async_walk(OID_ifOperStatus):
-            idx = int(oid.split(".")[-1])
-            self.cache["ifTable"].setdefault(idx, {})["oper"] = int(val)
-
-    async def _async_walk_ipv4(self) -> None:
-        ip_to_index: Dict[str, int | None] = {}
-        ip_to_mask: Dict[str, str] = {}
-
-        for _oid, val in await self._async_walk(OID_ipAdEntAddr):
-            ip_to_index[str(val)] = None
-
-        for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
-            parts = oid.split(".")[-4:]
-            ip = ".".join(parts)
-            ip_to_index[ip] = int(val)
-
-        for oid, val in await self._async_walk(OID_ipAdEntNetMask):
-            parts = oid.split(".")[-4:]
-            ip = ".".join(parts)
-            ip_to_mask[ip] = str(val)
-
-        self.cache["ipIndex"] = ip_to_index
-        self.cache["ipMask"] = ip_to_mask
-
-    async def set_alias(self, if_index: int, alias: str) -> bool:
-        ok = await self.hass.async_add_executor_job(
-            _do_set_alias, self.engine, self.community_data, self.target, self.context, if_index, alias
-        )
-        if ok:
-            self.cache["ifTable"].setdefault(if_index, {})["alias"] = alias
-        else:
-            _LOGGER.warning("Failed to set alias via SNMP on ifIndex %s", if_index)
-        return ok
-
-    async def set_admin_status(self, if_index: int, value: int) -> bool:
-        return await self.hass.async_add_executor_job(
-            _do_set_admin_status, self.engine, self.community_data, self.target, self.context, if_index, value
-        )
-
-
-# ---------- helpers for config_flow ----------
-
-async def test_connection(hass: HomeAssistant, host: str, community: str, port: int) -> bool:
-    client = SwitchSnmpClient(hass, host, community, port)
-    sysname = await client._async_get_one(OID_sysName)
-    return sysname is not None
-
-
-async def get_sysname(hass: HomeAssistant, host: str, community: str, port: int) -> Optional[str]:
-    client = SwitchSnmpClient(hass, host, community, port)
-    return await client._async_get_one(OID_sysName)
+            self.cache
