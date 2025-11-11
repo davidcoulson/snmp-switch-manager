@@ -1,193 +1,201 @@
+# custom_components/switch_manager/switch.py
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from homeassistant.components.switch import SwitchEntity
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.components.switch import SwitchEntity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity import DeviceInfo
 
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_PORT
+from .snmp import SwitchSnmpClient  # we only rely on the public client
 
 _LOGGER = logging.getLogger(__name__)
 
-# ---- Safe local ifType numbers (inline so we don’t import from snmp.py)
-IFT_ETHERNET_CSMACD = 6           # ethernetCsmacd
-IFT_SOFTWARE_LOOPBACK = 24        # softwareLoopback
-IFT_PROP_VIRTUAL = 53             # propVirtual (some loopbacks/VLANs show as this)
-IFT_L2VLAN = 135                  # l2vlan (common for VLAN SVI)
-IFT_L3IPVLAN = 136                # l3ipvlan (also seen for VLAN SVI)
-IFT_IEEE8023AD_LAG = 161          # ieee8023adLag
 
-def _is_vlan_iftype(v: Optional[int]) -> bool:
-    return v in {IFT_L2VLAN, IFT_L3IPVLAN, IFT_PROP_VIRTUAL}
+# ---------------------------
+# Helpers
+# ---------------------------
 
-def _is_loopback_iftype(v: Optional[int], name: str, alias: str) -> bool:
-    if v == IFT_SOFTWARE_LOOPBACK:
-        return True
-    t = (name or "").lower() + " " + (alias or "").lower()
-    return "loopback" in t
+def _merge_entry_data(entry: ConfigEntry) -> Dict[str, Any]:
+    """Return a merged (data ∪ options) dict without raising KeyError."""
+    merged: Dict[str, Any] = {}
+    if hasattr(entry, "data") and isinstance(entry.data, dict):
+        merged.update(entry.data)
+    if hasattr(entry, "options") and isinstance(entry.options, dict):
+        merged.update(entry.options)
+    return merged
+
+
+# ---------------------------
+# Platform setup
+# ---------------------------
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up Switch Manager switches from a config entry."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
-    host: str = data["host"]
+    """Set up Switch entities for a config entry."""
 
-    ports: list[dict[str, Any]] = coordinator.data.get("ports", [])
-    entities: list[SwitchManagerPort] = []
+    _LOGGER.debug("Switch platform setup start for entry_id=%s", entry.entry_id)
 
-    for p in ports:
-        if p.get("is_cpu"):
+    # 1) Prefer the client that __init__.py stored for us
+    store = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    client: Optional[SwitchSnmpClient] = store.get("client")  # type: ignore[assignment]
+
+    # 2) If missing (e.g. reload), reconstruct from entry data/options
+    if client is None:
+        cfg = _merge_entry_data(entry)
+        host = cfg.get("host") or cfg.get("ip") or cfg.get("address")
+        community = cfg.get("community") or cfg.get("snmp_community")
+        port = int(cfg.get("port", DEFAULT_PORT))
+
+        if not host or not community:
+            _LOGGER.error(
+                "Missing SNMP connection details (host/community) for entry_id=%s; "
+                "data keys=%s options keys=%s",
+                entry.entry_id,
+                list(getattr(entry, "data", {}).keys()),
+                list(getattr(entry, "options", {}).keys()),
+            )
+            return
+
+        client = await SwitchSnmpClient.async_create(hass, host, port, community)
+        hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})["client"] = client
+
+    # 3) Query port/interface table from the client.
+    #    We tolerate either 'async_get_port_data' (older) or 'async_get_interfaces' (fallback).
+    interfaces: List[Dict[str, Any]]
+    if hasattr(client, "async_get_port_data"):
+        interfaces = await client.async_get_port_data()  # type: ignore[attr-defined]
+    elif hasattr(client, "async_get_interfaces"):
+        interfaces = await client.async_get_interfaces()  # type: ignore[attr-defined]
+    else:
+        _LOGGER.error(
+            "SNMP client does not provide an interface listing method. "
+            "Expected 'async_get_port_data' or 'async_get_interfaces'."
+        )
+        return
+
+    entities: List[SwitchPortEntity] = []
+    for row in interfaces:
+        # Expected row keys (we tolerate variations):
+        # ifIndex, ifDescr, ifAlias, ifAdminStatus, ifOperStatus
+        idx = row.get("ifIndex") or row.get("index")
+        descr = row.get("ifDescr") or row.get("name") or f"Port {idx}"
+        alias = row.get("ifAlias") or row.get("alias") or ""
+        admin = int(row.get("ifAdminStatus", row.get("admin", 1)))
+        oper = int(row.get("ifOperStatus", row.get("oper", 1)))
+
+        # Skip rows without an index
+        if idx is None:
             continue
-        friendly = _friendly_name(p)
+
         entities.append(
-            SwitchManagerPort(
-                coordinator=coordinator,
-                entry=entry,
-                host=host,
-                port=p,
-                friendly_name=friendly,
+            SwitchPortEntity(
+                entry_id=entry.entry_id,
+                index=int(idx),
+                name=str(descr),
+                alias=str(alias),
+                admin=admin,
+                oper=oper,
+                client=client,
             )
         )
 
-    if entities:
-        async_add_entities(entities)
+    if not entities:
+        _LOGGER.warning("No switch entities discovered for entry_id=%s", entry.entry_id)
 
-def _friendly_name(p: Dict[str, Any]) -> str:
-    idx = p.get("index")
-    name = str(p.get("name") or "")
-    alias = str(p.get("alias") or "")
-    iftype = p.get("ifType")
-    unit = p.get("unit", 1)
-    slot = p.get("slot", 0)
-    port = p.get("port", idx)
+    async_add_entities(entities)
+    _LOGGER.debug("Switch platform setup complete: added %d entities", len(entities))
 
-    # VLAN SVI
-    if _is_vlan_iftype(iftype) or name.lower().startswith(("vl", "vlan")):
-        vlan_id = p.get("vlan_id") or _extract_vlan_from_name(name or alias)
-        if vlan_id:
-            return f"Vl{vlan_id}"
 
-    # Loopback
-    if _is_loopback_iftype(iftype, name, alias):
-        return "Lo0"
+# ---------------------------
+# Entity
+# ---------------------------
 
-    # LAG
-    if iftype == IFT_IEEE8023AD_LAG or name.lower().startswith(("po", "port-channel", "lag")):
-        agg_id = p.get("aggregate_id") or port or idx
-        return f"Po{agg_id}"
+class SwitchPortEntity(SwitchEntity):
+    """A network switch port represented as a Toggleable entity."""
 
-    # Ethernet (Gi/Te) – use speed hint if available
-    speed = int(p.get("speed", 0) or 0)
-    if iftype == IFT_ETHERNET_CSMACD:
-        if speed >= 10_000_000_000 or "10g" in name.lower():
-            return f"Te{unit}/{slot}/{port}"
-        return f"Gi{unit}/{slot}/{port}"
-
-    if speed >= 10_000_000_000 or "10g" in name.lower():
-        return f"Te{unit}/{slot}/{port}"
-    if "gigabit" in name.lower():
-        return f"Gi{unit}/{slot}/{port}"
-
-    return alias or (f"Port {idx}" if idx is not None else "Port")
-
-def _extract_vlan_from_name(raw: str) -> Optional[int]:
-    if not raw:
-        return None
-    raw = raw.replace("-", " ").replace("_", " ")
-    parts = raw.split()
-    for i, tok in enumerate(parts):
-        lo = tok.lower()
-        if lo.startswith("vl"):
-            try:
-                return int(tok[2:])
-            except ValueError:
-                continue
-        if lo == "vlan" and i + 1 < len(parts):
-            try:
-                return int(parts[i + 1])
-            except ValueError:
-                continue
-        try:
-            v = int(tok)
-            if 1 <= v <= 4094:
-                return v
-        except ValueError:
-            pass
-    return None
-
-class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
-    """A single switch port entity."""
-
-    _attr_icon = "mdi:ethernet"
+    _attr_should_poll = False
 
     def __init__(
         self,
-        coordinator,
-        entry: ConfigEntry,
-        host: str,
-        port: Dict[str, Any],
-        friendly_name: str,
+        *,
+        entry_id: str,
+        index: int,
+        name: str,
+        alias: str,
+        admin: int,
+        oper: int,
+        client: SwitchSnmpClient,
     ) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._host = host
-        self._port = port
-        self._attr_name = friendly_name
-        idx = port.get("index")
-        self._attr_unique_id = f"{host}-if-{idx}"
+        self._entry_id = entry_id
+        self._index = index
+        self._name = name
+        self._alias = alias
+        self._admin = admin
+        self._oper = oper
+        self._client = client
 
-    @property
-    def device_info(self) -> DeviceInfo:
-        sys = self.coordinator.data.get("system", {}) or {}
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._host)},
-            name=sys.get("hostname") or self._host,
-            manufacturer=sys.get("manufacturer"),
-            model=sys.get("model"),
-            sw_version=sys.get("firmware"),
-        )
+        self._attr_unique_id = f"{entry_id}_if_{index}"
+        self._attr_name = name
+
+    # ---- Home Assistant required properties ----
 
     @property
     def is_on(self) -> bool:
-        return int(self._port.get("admin", 0) or 0) == 1
+        # Reflect Admin state (1=up, 2=down) — default to True if unknown
+        return int(self._admin) == 1
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._set_admin(1)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._set_admin(2)
-
-    async def _set_admin(self, state: int) -> None:
-        client = self.coordinator.data.get("client")
-        if not client:
-            return
-        idx = int(self._port.get("index"))
-        await client.async_set_admin_status(idx, state)
-        await self.coordinator.async_request_refresh()
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self._client.host if hasattr(self._client, "host") else "Switch",
+            manufacturer=None,
+            model=None,
+        )
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
-        p = self._port
-        attrs: Dict[str, Any] = {
-            "Index": p.get("index"),
-            "Name": p.get("name"),
-            "Alias": p.get("alias"),
-            "Admin": p.get("admin"),
-            "Oper": p.get("oper"),
+        return {
+            "Index": self._index,
+            "Name": self._name,
+            "Alias": self._alias,
+            "Admin": int(self._admin),
+            "Oper": int(self._oper),
         }
-        if p.get("ip_cidr"):
-            attrs["IP address"] = p["ip_cidr"]
-        elif p.get("ip"):
-            attrs["IP address"] = p["ip"]
-        return attrs
 
-    @property
-    def available(self) -> bool:
-        return self.coordinator.last_update_success
+    # ---- Commands ----
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable the port (admin up) if supported by the client."""
+        if hasattr(self._client, "async_set_admin_status"):
+            ok = await self._client.async_set_admin_status(self._index, True)  # type: ignore[attr-defined]
+            if ok:
+                self._admin = 1
+                self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable the port (admin down) if supported by the client."""
+        if hasattr(self._client, "async_set_admin_status"):
+            ok = await self._client.async_set_admin_status(self._index, False)  # type: ignore[attr-defined]
+            if ok:
+                self._admin = 2
+                self.async_write_ha_state()
+
+    # ---- Updates ----
+
+    async def async_update(self) -> None:
+        """Refresh a single port row if the client supports it."""
+        if hasattr(self._client, "async_get_port_row"):
+            row = await self._client.async_get_port_row(self._index)  # type: ignore[attr-defined]
+            if row:
+                self._admin = int(row.get("ifAdminStatus", row.get("admin", self._admin)))
+                self._oper = int(row.get("ifOperStatus", row.get("oper", self._oper)))
+                alias = row.get("ifAlias") or row.get("alias")
+                if alias is not None:
+                    self._alias = str(alias)
