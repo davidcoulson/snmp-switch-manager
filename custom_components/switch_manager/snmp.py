@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
 
-# Keep imports light at module import time (no SnmpEngine() calls here)
+# Import pysnmp symbols lazily & safely (no heavy work at import time)
 try:
     from pysnmp.hlapi import (
         CommunityData,
@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
     SnmpEngine = UdpTransportTarget = getCmd = nextCmd = None  # type: ignore
 
 
-# IANA ifType constants used elsewhere (do not remove)
+# IANA ifType constants (used by switch.py and others)
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 IANA_IFTYPE_IEEE8023AD_LAG = 161  # Port-Channel/LAG on many vendors
 
@@ -47,8 +47,19 @@ OID_SYS_NAME = "1.3.6.1.2.1.1.5.0"
 OID_SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 
 
-def _ok() -> bool:
-    """Return True if pysnmp imports are available."""
+# ---------------- Exceptions expected by config_flow ----------------
+class SnmpError(Exception):
+    """Generic SNMP runtime error."""
+
+
+class SnmpDependencyError(SnmpError):
+    """Raised when pysnmp (or required symbols) is unavailable."""
+
+
+# -------------------------------------------------------------------
+
+def _pysnmp_ok() -> bool:
+    """Return True if the pysnmp symbols we use are importable."""
     return all(
         (
             CommunityData,
@@ -63,17 +74,16 @@ def _ok() -> bool:
     )
 
 
-# ---------- RESTORED for config_flow compatibility ----------
 def ensure_snmp_available() -> None:
     """
-    Config-flow probe: keep it *non-blocking*.
+    Lightweight probe used by config flow.
 
-    Only verifies that pysnmp is importable and the symbols we use exist.
-    Do not instantiate SnmpEngine() or touch the filesystem here.
+    IMPORTANT: Keep this NON-BLOCKING. We only verify imports/symbols and
+    raise SnmpDependencyError if pysnmp isn't usable. Do NOT instantiate
+    SnmpEngine() or touch the filesystem here.
     """
-    if not _ok():
-        raise SnmpError("pysnmp not available")
-# -----------------------------------------------------------
+    if not _pysnmp_ok():
+        raise SnmpDependencyError("pysnmp is not available")
 
 
 @dataclass
@@ -86,12 +96,8 @@ class SwitchPort:
     iftype: int
 
 
-class SnmpError(Exception):
-    pass
-
-
 class SwitchSnmpClient:
-    """Small SNMP helper. All blocking work stays in executor jobs."""
+    """Small SNMP helper. All blocking calls run in the executor."""
 
     def __init__(self, hass: HomeAssistant, host: str, port: int, community: str) -> None:
         self._hass = hass
@@ -103,7 +109,7 @@ class SwitchSnmpClient:
     async def async_create(
         cls, hass: HomeAssistant, host: str, port: int, community: str
     ) -> "SwitchSnmpClient":
-        # Keep config flow happy and fast
+        # Keep config flow safe & fast
         ensure_snmp_available()
         return cls(hass, host, port, community)
 
