@@ -1,100 +1,204 @@
+# custom_components/switch_manager/switch.py
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN
-from .snmp import IANA_IFTYPE_SOFTWARE_LOOPBACK, IANA_IFTYPE_IEEE8023AD_LAG
+from .snmp import (
+    IANA_IFTYPE_ETHERNET_CSMACD,
+    IANA_IFTYPE_IEEE8023AD_LAG,
+    IANA_IFTYPE_SOFTWARE_LOOPBACK,
+    IANA_IFTYPE_VLAN_SUBINTERFACE,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
-    node = hass.data[DOMAIN].get(entry.entry_id)
-    if not node:
-        _LOGGER.error("Switch setup: missing node for entry_id=%s", entry.entry_id)
-        return
-    coordinator = node["coordinator"]
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Set up Switch Manager switches from a config entry."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator = data["coordinator"]  # DataUpdateCoordinator you already populate
+    host: str = data["host"]           # stored at setup in __init__.py
+    # Build entities once from latest coordinator snapshot
+    ports: list[dict[str, Any]] = coordinator.data.get("ports", [])
 
-    ports: List[Dict[str, Any]] = (coordinator.data or {}).get("ports", []) or []
-    if not ports:
-        _LOGGER.warning("No ports returned from coordinator yet")
-        return
-
-    entities: List[SwitchEntity] = []
+    entities: list[SwitchManagerPort] = []
     for p in ports:
-        # Skip unconfigured LAGs (common nuisance)
-        if int(p.get("iftype", 0)) == IANA_IFTYPE_IEEE8023AD_LAG and not p.get("alias"):
+        # Skip CPU / virtual aggregates as you already do elsewhere
+        if p.get("is_cpu"):
             continue
-        entities.append(SwitchManagerPort(coordinator, entry, p))
-    async_add_entities(entities)
+        # Friendly name is already computed upstream when possible, but keep a fallback
+        friendly = _friendly_name(p)
+        entities.append(
+            SwitchManagerPort(
+                coordinator=coordinator,
+                entry=entry,
+                host=host,
+                port=p,
+                friendly_name=friendly,
+            )
+        )
+
+    if not entities:
+        _LOGGER.debug("No ports discovered; nothing to add")
+        return
+
+    async_add_entities(entities, update_before_add=False)
+
+
+def _friendly_name(p: Dict[str, Any]) -> str:
+    """Derive a concise interface name (Gi/Te/Vl/Lo) based on type + U/S/P."""
+    idx = p.get("index")
+    name: str = f"Port {idx}" if idx is not None else "Port"
+
+    iftype = p.get("ifType")
+    unit = p.get("unit", 1)
+    slot = p.get("slot", 0)
+    port = p.get("port", idx)
+
+    # VLAN subinterfaces
+    if iftype == IANA_IFTYPE_VLAN_SUBINTERFACE:
+        vlan_id = p.get("vlan_id") or _extract_vlan_from_name(p.get("name", ""))
+        if vlan_id:
+            return f"Vl{vlan_id}"
+        return p.get("alias") or name
+
+    # Loopback
+    if iftype == IANA_IFTYPE_SOFTWARE_LOOPBACK:
+        return "Lo0"
+
+    # LAGs: keep only configured ones upstream; here just label if present
+    if iftype == IANA_IFTYPE_IEEE8023AD_LAG:
+        agg_id = p.get("aggregate_id") or port or idx
+        return f"Po{agg_id}"
+
+    # Ethernet (1G vs 10G) – rely on speed hint if present
+    speed = int(p.get("speed", 0) or 0)
+    if iftype == IANA_IFTYPE_ETHERNET_CSMACD:
+        if speed >= 10_000_000_000 or "10G" in (p.get("name") or ""):
+            return f"Te{unit}/{slot}/{port}"
+        return f"Gi{unit}/{slot}/{port}"
+
+    # Fallbacks
+    if speed >= 10_000_000_000:
+        return f"Te{unit}/{slot}/{port}"
+    if "Gigabit" in (p.get("name") or ""):
+        return f"Gi{unit}/{slot}/{port}"
+    return p.get("alias") or name
+
+
+def _extract_vlan_from_name(raw: str) -> Optional[int]:
+    if not raw:
+        return None
+    raw = raw.strip()
+    # Accept 'Vl11', 'VLAN 11', 'Vlan11', etc.
+    for token in raw.replace("-", " ").replace("_", " ").split():
+        if token.lower().startswith("vl"):
+            try:
+                return int(token[2:])
+            except ValueError:
+                continue
+        if token.lower() == "vlan":
+            # next token might be the id – handled by caller if needed
+            continue
+        try:
+            # sometimes name is literally "11" for Vl11
+            v = int(token)
+            if 1 <= v <= 4094:
+                return v
+        except ValueError:
+            pass
+    return None
 
 
 class SwitchManagerPort(CoordinatorEntity, SwitchEntity):
+    """A single switch port entity."""
+
     _attr_icon = "mdi:ethernet"
 
-    def __init__(self, coordinator, entry: ConfigEntry, port: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        coordinator,
+        entry: ConfigEntry,
+        host: str,
+        port: Dict[str, Any],
+        friendly_name: str,
+    ) -> None:
         super().__init__(coordinator)
-        self._entry_id = entry.entry_id
-        self._index = int(port["index"])
-        self._iftype = int(port.get("iftype", 0))
-        self._name_raw = port.get("name", "")
-        self._alias = port.get("alias", "")
-        self._attr_unique_id = f"{entry.entry_id}-port-{self._index}"
-        self._attr_name = self._friendly_name(self._name_raw, self._iftype, self._index)
+        self._entry = entry
+        self._host = host
+        self._port = port
+        self._friendly_name = friendly_name
 
-    @staticmethod
-    def _friendly_name(descr: str, iftype: int, index: int) -> str:
-        text = descr or ""
-        lower = text.lower()
-        # VLANs like "Vl11"
-        if lower.startswith("vl"):
-            return text.upper()
-        # loopback
-        if iftype == IANA_IFTYPE_SOFTWARE_LOOPBACK or "loopback" in lower:
-            return "Lo0"
-        # 1G / 10G common patterns
-        if "gigabit" in lower or lower.startswith("gi"):
-            # try to keep Gi1/0/46 style if present in description
-            return "Gi" + "".join(ch for ch in text if ch.isdigit() or ch in "/")
-        if "20g" in lower or "tengig" in lower or lower.startswith("te"):
-            return "Te" + "".join(ch for ch in text if ch.isdigit() or ch in "/")
-        if "port-channel" in lower or lower.startswith("po"):
-            return "Po" + "".join(ch for ch in text if ch.isdigit())
-        # fallback
-        return text or f"Port {index}"
+        # Unique & stable per host+ifIndex
+        idx = port.get("index")
+        self._attr_unique_id = f"{host}-if-{idx}"
+        self._attr_name = friendly_name
 
+    # ---- Device binding (fixes “no Device” column & broken click behavior)
+    @property
+    def device_info(self) -> DeviceInfo:
+        sys = self.coordinator.data.get("system", {}) or {}
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._host)},
+            name=sys.get("hostname") or self._host,
+            manufacturer=sys.get("manufacturer"),
+            model=sys.get("model"),
+            sw_version=sys.get("firmware"),
+        )
+
+    # ---- Switch state
     @property
     def is_on(self) -> bool:
-        state = int(self._port_data.get("oper", 0))
-        return state == 1
+        # 'admin' 1=up / 2=down is what we were using
+        return int(self._port.get("admin", 0) or 0) == 1
 
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set_admin(1)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set_admin(2)
+
+    async def _set_admin(self, state: int) -> None:
+        client = self.coordinator.data.get("client")
+        if not client:
+            _LOGGER.debug("No SNMP client available to set admin on %s", self.entity_id)
+            return
+        idx = int(self._port.get("index"))
+        await client.async_set_admin_status(idx, state)
+        # Request a refresh
+        await self.coordinator.async_request_refresh()
+
+    # ---- Attributes
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
-        attrs = {
-            "Index": self._index,
-            "Name": self._name_raw,
-            "Alias": self._port_data.get("alias", ""),
-            "Admin": int(self._port_data.get("admin", 0)),
-            "Oper": int(self._port_data.get("oper", 0)),
+        p = self._port
+        attrs: Dict[str, Any] = {
+            "Index": p.get("index"),
+            "Name": p.get("name"),
+            "Alias": p.get("alias"),
+            "Admin": p.get("admin"),
+            "Oper": p.get("oper"),
         }
-        ip = self._port_data.get("ip") or self._port_data.get("ip_address")
-        if ip:
-            attrs["IP address"] = ip
+        # If an IP (and mask bits) were already computed upstream, include it
+        if p.get("ip_cidr"):
+            attrs["IP address"] = p["ip_cidr"]
+        elif p.get("ip"):
+            attrs["IP address"] = p["ip"]
         return attrs
 
-    # ------------- internals -------------
-
+    # Keep entity enabled by default
     @property
-    def _port_data(self) -> Dict[str, Any]:
-        ports: List[Dict[str, Any]] = (self.coordinator.data or {}).get("ports", []) or []
-        for p in ports:
-            if int(p.get("index", -1)) == self._index:
-                return p
-        return {}
-
+    def available(self) -> bool:
+        # Use coordinator success; specific ports can be unavailable if missing
+        return self.coordinator.last_update_success
