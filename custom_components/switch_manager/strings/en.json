@@ -1,0 +1,20 @@
+{
+  "title": "Switch Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to your switch",
+        "description": "Provide SNMP access details. Uses SNMP v2c.",
+        "data": {
+          "host": "Host/IP",
+          "community": "SNMP community (RW for alias writes)",
+          "port": "Port",
+          "name": "Friendly name (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect or SNMP timed out"
+    }
+  }
+}
