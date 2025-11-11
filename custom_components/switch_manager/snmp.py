@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from homeassistant.core import HomeAssistant
 
 # -------------------------------------------------------------------
-# Exceptions requested/used by config_flow
+# Exceptions used by config_flow
 # -------------------------------------------------------------------
 class SnmpError(Exception):
     """Generic SNMP runtime error."""
@@ -17,7 +17,6 @@ class SnmpDependencyError(SnmpError):
     """Raised when pysnmp (or required symbols) is unavailable."""
 
 
-# Explicit export list so names are guaranteed visible to importers
 __all__ = [
     "SnmpError",
     "SnmpDependencyError",
@@ -42,15 +41,12 @@ try:
         nextCmd,
     )
 except Exception:  # pragma: no cover
-    # Keep module importable even if pysnmp is missing;
-    # config_flow will call ensure_snmp_available() and get a clean error.
     CommunityData = ContextData = ObjectIdentity = ObjectType = None  # type: ignore
     SnmpEngine = UdpTransportTarget = getCmd = nextCmd = None  # type: ignore
 
 # -------------------------------------------------------------------
 # Constants
 # -------------------------------------------------------------------
-# IANA ifType values we reference from switch.py
 IANA_IFTYPE_SOFTWARE_LOOPBACK = 24
 IANA_IFTYPE_IEEE8023AD_LAG = 161  # Port-Channel/LAG on many vendors
 
@@ -73,11 +69,7 @@ OID_SYS_NAME = "1.3.6.1.2.1.1.5.0"
 OID_SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 
 
-# -------------------------------------------------------------------
-# Light-weight dependency probe used by config_flow
-# -------------------------------------------------------------------
 def _pysnmp_ok() -> bool:
-    """True if required pysnmp symbols are importable."""
     return all(
         (
             CommunityData,
@@ -93,17 +85,10 @@ def _pysnmp_ok() -> bool:
 
 
 def ensure_snmp_available() -> None:
-    """
-    Verify pysnmp is importable. **No blocking work** here.
-    Raises SnmpDependencyError if missing.
-    """
     if not _pysnmp_ok():
         raise SnmpDependencyError("pysnmp is not available")
 
 
-# -------------------------------------------------------------------
-# Data model
-# -------------------------------------------------------------------
 @dataclass
 class SwitchPort:
     index: int
@@ -114,9 +99,6 @@ class SwitchPort:
     iftype: int
 
 
-# -------------------------------------------------------------------
-# Client
-# -------------------------------------------------------------------
 class SwitchSnmpClient:
     """Minimal SNMP client. All blocking calls run in executor threads."""
 
@@ -124,27 +106,28 @@ class SwitchSnmpClient:
         self._hass = hass
         self._host = host
         self._port = port
-        self._community = community
+        self._community_str = community  # <— renamed to avoid shadowing the method
 
     @classmethod
     async def async_create(
         cls, hass: HomeAssistant, host: str, port: int, community: str
     ) -> "SwitchSnmpClient":
-        ensure_snmp_available()  # keep config flow fast/safe
+        ensure_snmp_available()
         return cls(hass, host, port, community)
 
     # ----------------- low-level helpers (sync; called in executor) -----------------
     def _target(self) -> UdpTransportTarget:
         return UdpTransportTarget((self._host, self._port), timeout=2, retries=1)
 
-    def _community(self) -> CommunityData:
-        return CommunityData(self._community, mpModel=0)
+    def _community_data(self) -> CommunityData:
+        """Return pysnmp CommunityData from stored string."""
+        return CommunityData(self._community_str, mpModel=0)
 
     def _get(self, oid: str) -> Optional[str]:
         errorIndication, errorStatus, errorIndex, varBinds = next(
             getCmd(
                 SnmpEngine(),
-                self._community(),
+                self._community_data(),
                 self._target(),
                 ContextData(),
                 ObjectType(ObjectIdentity(oid)),
@@ -160,7 +143,7 @@ class SwitchSnmpClient:
         out: List[Tuple[str, str]] = []
         for (errInd, errStat, errIdx, varBinds) in nextCmd(
             SnmpEngine(),
-            self._community(),
+            self._community_data(),
             self._target(),
             ContextData(),
             ObjectType(ObjectIdentity(base_oid)),
@@ -174,8 +157,6 @@ class SwitchSnmpClient:
 
     # ------------------------------ readers (async) --------------------------------
     async def async_get_system_info(self) -> Dict[str, str]:
-        """Return firmware, hostname, manufacturer+model, uptime (seconds)."""
-
         def _read() -> Dict[str, str]:
             sys_descr = self._get(OID_SYS_DESCR) or ""
             hostname = self._get(OID_SYS_NAME) or ""
@@ -194,7 +175,7 @@ class SwitchSnmpClient:
 
             seconds = ""
             if uptime_ticks.isdigit():
-                seconds = str(int(uptime_ticks) // 100)  # Timeticks are 1/100s
+                seconds = str(int(uptime_ticks) // 100)
 
             return {
                 "firmware": firmware or "",
@@ -206,8 +187,6 @@ class SwitchSnmpClient:
         return await self._hass.async_add_executor_job(_read)
 
     async def async_get_ports(self) -> List[SwitchPort]:
-        """Walk interface table and return normalized ports."""
-
         def _read() -> List[SwitchPort]:
             descr = {oid.split(".")[-1]: val for oid, val in self._walk(OID_IFDESCR)}
             alias = {oid.split(".")[-1]: val for oid, val in self._walk(OID_IFALIAS)}
@@ -229,8 +208,7 @@ class SwitchSnmpClient:
                     oper=int(oper.get(idx_str, "0") or 0),
                     iftype=int(iftype.get(idx_str, "0") or 0),
                 )
-                # Skip known CPU pseudo-ifIndex on your hardware
-                if port.index == 661:
+                if port.index == 661:  # skip CPU pseudo-port
                     continue
                 out.append(port)
             return out
@@ -239,7 +217,6 @@ class SwitchSnmpClient:
 
     async def async_get_ipv4_map(self) -> Dict[int, str]:
         """Return {ifIndex: 'a.b.c.d/len'} for interfaces that have IPv4."""
-
         def _read() -> Dict[int, str]:
             idx_map: Dict[str, int] = {}
             for oid, val in self._walk(OID_IPADDR_IFINDEX):
