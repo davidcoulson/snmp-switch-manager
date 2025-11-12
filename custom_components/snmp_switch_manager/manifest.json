@@ -1,11 +1,19 @@
 {
-  "domain": "switch_manager",
-  "name": "Switch Manager",
-  "codeowners": ["@OtisPresley"],
+  "domain": "snmp_switch_manager",
+  "name": "SNMP Switch Manager",
+  "codeowners": [
+    "@OtisPresley"
+  ],
   "config_flow": true,
-  "documentation": "https://github.com/OtisPresley/switch-manager",
+  "dependencies": [],
+  "documentation": "https://github.com/OtisPresley/snmp-switch-manager",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/OtisPresley/switch-manager/issues",
-  "requirements": ["pysnmp>=4.4.12"],
-  "version": "0.3.0"
+  "issue_tracker": "https://github.com/OtisPresley/snmp-switch-manager/issues",
+  "loggers": [
+    "pysnmp"
+  ],
+  "requirements": [
+    "pysnmp>=4.4.12"
+  ],
+  "version": "0.1.0"
 }
