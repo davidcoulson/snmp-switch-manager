@@ -102,7 +102,7 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 
    The `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
    
-   Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
+   Clicking a port opens a dialog with quick actions to toggle the port or edit its description. There is also an alternative `list` view depicted in the      third image below.
 
 <p float="left">
   <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot1.png" alt="Screenshot 1" width="325"/>
