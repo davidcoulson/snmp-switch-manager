@@ -85,9 +85,19 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 3. Place the card on any dashboard:
 
    ```yaml
-   type: custom:snmp-switch-manager-card
-   title: Core Switch
-   device_name: Switch
+    type: custom:snmp-switch-manager-card
+    title: Core Switch
+    view: panel
+    ports_per_row: 12
+    info_position: below
+    label_size: 8
+    anchor_entity: switch.gi1_0_1
+    diagnostics:
+      - sensor.hostname
+      - sensor.firmware_revision
+      - sensor.manufacturer
+      - sensor.model
+      - sensor.uptime
    ```
 
    Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
