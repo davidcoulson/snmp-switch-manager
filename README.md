@@ -100,6 +100,8 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
       - sensor.uptime
    ```
 
+   The `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
+   
    Clicking a port opens a dialog with quick actions to toggle the port or edit its description.
 
 <p float="left">
