@@ -2,53 +2,84 @@ class SwitchManagerCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._config = null;
     this._hass = null;
-    this._dialogEntity = null;
+    this._config = null;
+    this._needsAuto = false;
+    this._autoStarted = false;
   }
 
   setConfig(config) {
     const rawPorts = config.ports ?? config.entities;
-    if (!rawPorts || !Array.isArray(rawPorts) || !rawPorts.length) {
-      throw new Error("You must provide a list of port switch entities.");
-    }
 
-    const ports = rawPorts.map((entry) => {
-      if (typeof entry === "string") {
-        return { entity: entry };
-      }
-      if (!entry.entity) {
-        throw new Error("Each port entry must include an entity property.");
-      }
-      const normalized = { ...entry };
-      if (normalized.x != null) {
-        normalized.x = Number(normalized.x);
-      }
-      if (normalized.y != null) {
-        normalized.y = Number(normalized.y);
-      }
-      return normalized;
-    });
+    if (Array.isArray(rawPorts) && rawPorts.length > 0) {
+      const normalize = (entry) => {
+        if (typeof entry === "string") return { entity: entry };
+        if (!entry || !entry.entity)
+          throw new Error("Each port entry must include an entity property.");
+        return { ...entry };
+      };
 
-    let markerSize = Number(config.marker_size ?? 26);
-    if (!Number.isFinite(markerSize) || markerSize <= 0) {
-      markerSize = 26;
+      const ports = rawPorts.map(normalize);
+
+      const markerSize = Number(config.marker_size ?? 26);
+      this._config = {
+        title: config.title,
+        image: config.image,
+        layout:
+          config.layout ||
+          (ports.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+            ? "image"
+            : "grid"),
+        marker_size:
+          Number.isFinite(markerSize) && markerSize > 0 ? markerSize : 26,
+        ports,
+        device_id: config.device_id,
+        device_name: config.device_name,
+      };
+
+      this._needsAuto = false;
+      this._autoStarted = false;
+      this._render();
+      return;
     }
 
     this._config = {
       title: config.title,
       image: config.image,
-      layout:
-        config.layout ||
-        (ports.every((port) => Number.isFinite(port.x) && Number.isFinite(port.y)) ? "image" : "grid"),
-      marker_size: markerSize,
-      ports,
+      layout: config.layout || "grid",
+      marker_size: Number(config.marker_size ?? 26),
+      ports: [],
+      device_id: config.device_id || null,
+      device_name: config.device_name || null,
     };
+
+    this._needsAuto = true;
+    this._autoStarted = false;
     this._render();
   }
 
   set hass(hass) {
     this._hass = hass;
+
+    if (
+      this._hass &&
+      this._config &&
+      this._needsAuto &&
+      !this._autoStarted &&
+      (!this._config.ports || this._config.ports.length === 0)
+    ) {
+      this._autoStarted = true;
+      this._autoDiscoverPorts()
+        .then((list) => {
+          if (Array.isArray(list) && list.length) {
+            this._config.ports = list.map((id) => ({ entity: id }));
+            this._needsAuto = false;
+            this._render();
+          }
+        })
+        .catch(() => {});
+    }
+
     this._render();
   }
 
@@ -56,397 +87,235 @@ class SwitchManagerCard extends HTMLElement {
     return 4;
   }
 
+  // ---------- Auto-discovery helpers ----------
+
+  async _findDeviceIdByName(name) {
+    const devices = await this._hass.callWS({
+      type: "config/device_registry/list",
+    });
+    const dev = devices.find(
+      (d) => d.name === name || d.name_by_user === name
+    );
+    return dev ? dev.id : null;
+  }
+
+  async _autoDiscoverPorts() {
+    let deviceId = this._config.device_id || null;
+    if (!deviceId && this._config.device_name) {
+      deviceId = await this._findDeviceIdByName(this._config.device_name);
+    }
+    if (!deviceId) return [];
+
+    const entities = await this._hass.callWS({
+      type: "config/entity_registry/list",
+    });
+
+    const ours = entities
+      .filter(
+        (e) =>
+          e.device_id === deviceId &&
+          e.platform === "snmp_switch_manager" && // <- renamed platform
+          e.domain === "switch"
+      )
+      .map((e) => e.entity_id);
+
+    const withStates = ours
+      .map((id) => ({ id, st: this._hass.states[id] }))
+      .filter((x) => x.st);
+
+    const filtered = withStates.filter(({ st }) => {
+      const n = (st.attributes?.Name || "").toString().toUpperCase();
+      return n !== "CPU";
+    });
+
+    filtered.sort((a, b) => {
+      const ai = Number(a.st.attributes?.Index);
+      const bi = Number(b.st.attributes?.Index);
+      if (Number.isFinite(ai) && Number.isFinite(bi)) return ai - bi;
+      return a.id.localeCompare(b.id);
+    });
+
+    return filtered.map((x) => x.id);
+  }
+
+  // ---------- Rendering ----------
+
   _render() {
+    if (!this.shadowRoot) return;
     if (!this._config || !this._hass) {
+      this.shadowRoot.innerHTML = `<ha-card><div class="card"><div>Loading…</div></div></ha-card>`;
       return;
     }
 
-    const ports = this._config.ports
-      .map((port) => ({
-        ...port,
-        entityId: port.entity,
-        stateObj: this._hass.states[port.entity],
-      }))
-      .filter((item) => item.stateObj);
+    const ports = (this._config.ports || [])
+      .map((p) => {
+        const id = p.entity;
+        const st = this._hass.states[id];
+        if (!st) return null;
+        return {
+          id,
+          st,
+          x: Number(p.x),
+          y: Number(p.y),
+        };
+      })
+      .filter(Boolean);
+
+    const title = this._config.title || "";
+    const layout = this._config.layout || "grid";
+    const markerSize = Number(this._config.marker_size ?? 26);
+    const image = this._config.image || null;
 
     const style = `
-      :host {
-        display: block;
-      }
-      ha-card {
-        display: block;
-        padding: 0;
-      }
-      .card {
-        padding: 16px;
-        box-sizing: border-box;
-        position: relative;
-      }
-      .header {
-        font-size: 20px;
-        font-weight: 500;
-        margin-bottom: 12px;
-      }
-      .image-container {
-        position: relative;
-        width: 100%;
-        margin-bottom: 12px;
-      }
-      .image-container img {
-        display: block;
-        width: 100%;
-        height: auto;
-        border-radius: 8px;
-      }
-      .switch-image {
-        width: 100%;
-        max-height: 180px;
-        object-fit: contain;
-        margin-bottom: 12px;
-        border-radius: 8px;
-      }
-      .port-marker {
-        position: absolute;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 50%;
-        border: 2px solid rgba(0, 0, 0, 0.25);
-        color: #fff;
-        font-size: 11px;
-        font-weight: 600;
-        cursor: pointer;
-        transform: translate(-50%, -50%);
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-        background: var(--divider-color);
-        transition: transform 0.1s ease, box-shadow 0.1s ease;
-      }
-      .port-marker:hover {
-        transform: translate(-50%, -50%) scale(1.05);
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
-      }
-      .port-marker.on {
-        background: var(--success-color, #21ba45);
-      }
-      .port-marker.off {
-        background: var(--error-color, #db2828);
-      }
-      .port-marker.unknown {
-        background: var(--warning-color, #fbbd08);
-      }
-      .ports {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
-        gap: 8px;
-      }
+      :host { display:block; }
+      ha-card { display:block; padding:0; }
+      .card { padding: 16px; box-sizing: border-box; position: relative; }
+      header { font-size: 20px; margin: 0 0 12px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
       .port {
-        background: var(--primary-background-color);
-        border-radius: 6px;
-        padding: 8px;
-        text-align: center;
-        cursor: pointer;
-        border: 2px solid transparent;
-        transition: transform 0.1s ease;
-      }
-      .port:hover {
-        transform: translateY(-2px);
-      }
-      .port-name {
-        font-size: 12px;
-        font-weight: 600;
-        margin-bottom: 6px;
-      }
-      .port-status {
-        width: 100%;
-        height: 12px;
-        border-radius: 4px;
-        background: var(--divider-color);
-      }
-      .port-status.on {
-        background: var(--success-color, #21ba45);
-      }
-      .port-status.off {
-        background: var(--error-color, #db2828);
-      }
-      .port-status.unknown {
-        background: var(--warning-color, #fbbd08);
-      }
-      .dialog-backdrop {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.4);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 10;
-      }
-      .dialog {
-        background: var(--card-background-color);
-        padding: 16px;
-        border-radius: 12px;
-        width: 320px;
-        max-width: 90%;
-        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-      .dialog h3 {
-        margin: 0;
-        font-size: 18px;
-      }
-      .dialog .description-input {
-        width: 100%;
-        padding: 8px;
-        border-radius: 6px;
+        border-radius: 12px; padding: 10px; background: var(--card-background-color);
         border: 1px solid var(--divider-color);
-        background: var(--primary-background-color);
-        color: var(--primary-text-color);
       }
-      .dialog .actions {
-        display: flex;
-        justify-content: flex-end;
-        gap: 8px;
-      }
-      button {
-        border: none;
-        border-radius: 6px;
-        padding: 8px 12px;
-        cursor: pointer;
-      }
-      button.primary {
+      .port .name { font-weight: 600; margin-bottom: 8px; }
+      .kv { display:flex; justify-content: space-between; font-size: 12px; opacity: .8; }
+      .imgwrap { position: relative; }
+      .imgwrap img { display: block; width: 100%; border-radius: 12px; }
+      .marker {
+        position:absolute; width:${markerSize}px; height:${markerSize}px;
+        border-radius:50%; border: 2px solid rgba(0,0,0,.2);
+        display:flex; align-items:center; justify-content:center;
+        transform: translate(-50%, -50%);
         background: var(--primary-color);
-        color: var(--text-primary-color);
+        color: #fff; font-size: 12px; cursor: pointer;
+        box-shadow: 0 2px 6px rgba(0,0,0,.25);
       }
-      button.secondary {
-        background: var(--secondary-background-color, #e0e0e0);
-        color: var(--primary-text-color);
+      .marker.off { background: var(--disabled-text-color); }
+      .empty { opacity:.7; font-style: italic; }
+      button.toggle {
+        margin-top: 8px; width: 100%;
+        border: none; border-radius: 8px; padding: 8px 10px;
+        background: var(--primary-color); color: #fff; cursor: pointer;
       }
+      button.toggle.off { background: var(--disabled-text-color); color: #222; }
     `;
 
-    const wrapper = document.createElement("div");
-    wrapper.classList.add("card");
+    const headerHtml = title ? `<header>${title}</header>` : "";
 
-    if (this._config.title) {
-      const header = document.createElement("div");
-      header.classList.add("header");
-      header.textContent = this._config.title;
-      wrapper.appendChild(header);
-    }
+    if (layout === "image" && image && ports.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))) {
+      const markers = ports
+        .map((p, idx) => {
+          const on = (p.st.state || "").toLowerCase() === "on";
+          const cls = on ? "marker" : "marker off";
+          const top = `${p.y}%`;
+          const left = `${p.x}%`;
+          const label = this._prettyName(p.st, p.id);
+          return `<div class="${cls}" title="${label}" style="top:${top};left:${left};" data-entity="${p.id}">${idx + 1}</div>`;
+        })
+        .join("");
 
-    if (
-      this._config.layout === "image" &&
-      this._config.image &&
-      ports.every((port) => Number.isFinite(port.x) && Number.isFinite(port.y))
-    ) {
-      const container = document.createElement("div");
-      container.classList.add("image-container");
+      this.shadowRoot.innerHTML = `
+        <ha-card>
+          <style>${style}</style>
+          <div class="card">
+            ${headerHtml}
+            <div class="imgwrap">
+              <img src="${image}">
+              ${markers}
+            </div>
+          </div>
+        </ha-card>
+      `;
 
-      const img = document.createElement("img");
-      img.src = this._config.image;
-      img.alt = this._config.title || "Switch";
-      container.appendChild(img);
-
-      ports.forEach(({ entityId, stateObj, x, y, label }) => {
-        const marker = document.createElement("div");
-        marker.classList.add("port-marker");
-        marker.dataset.entity = entityId;
-        marker.style.left = `${x}%`;
-        marker.style.top = `${y}%`;
-        marker.style.width = `${this._config.marker_size}px`;
-        marker.style.height = `${this._config.marker_size}px`;
-        marker.style.fontSize = `${Math.max(Math.round(this._config.marker_size * 0.45), 10)}px`;
-        marker.title = stateObj.attributes.friendly_name || entityId;
-
-        const haState = stateObj.state;
-        if (haState === "on") {
-          marker.classList.add("on");
-        } else if (haState === "off") {
-          marker.classList.add("off");
-        } else {
-          marker.classList.add("unknown");
-        }
-
-        const markerLabel = label ?? stateObj.attributes.port_id ?? "";
-        marker.textContent =
-          markerLabel !== undefined && markerLabel !== null && `${markerLabel}` !== ""
-            ? `${markerLabel}`
-            : "";
-        marker.addEventListener("click", () => this._openDialog(entityId));
-        container.appendChild(marker);
+      this.shadowRoot.querySelectorAll(".marker").forEach((el) => {
+        el.addEventListener("click", (ev) => {
+          const ent = ev.currentTarget.getAttribute("data-entity");
+          if (ent) this._toggle(ent);
+        });
       });
 
-      wrapper.appendChild(container);
-    } else if (ports.length) {
-      if (this._config.image) {
-        const img = document.createElement("img");
-        img.src = this._config.image;
-        img.classList.add("switch-image");
-        img.alt = this._config.title || "Switch";
-        wrapper.appendChild(img);
-      }
-
-      const portGrid = document.createElement("div");
-      portGrid.classList.add("ports");
-
-      ports.forEach(({ entityId, stateObj, label }) => {
-        const port = document.createElement("div");
-        port.classList.add("port");
-        port.dataset.entity = entityId;
-
-        const name = document.createElement("div");
-        name.classList.add("port-name");
-        const hasCustomLabel = label !== undefined && label !== null && `${label}` !== "";
-        name.textContent = hasCustomLabel ? `${label}` : stateObj.attributes.friendly_name || entityId;
-        port.appendChild(name);
-
-        const status = document.createElement("div");
-        status.classList.add("port-status");
-        const haState = stateObj.state;
-        if (haState === "on") {
-          status.classList.add("on");
-        } else if (haState === "off") {
-          status.classList.add("off");
-        } else {
-          status.classList.add("unknown");
-        }
-        port.appendChild(status);
-
-        const desc = document.createElement("div");
-        desc.style.fontSize = "11px";
-        desc.style.marginTop = "4px";
-        desc.textContent = stateObj.attributes.description || "";
-        port.appendChild(desc);
-
-        port.addEventListener("click", () => this._openDialog(entityId));
-        portGrid.appendChild(port);
-      });
-
-      wrapper.appendChild(portGrid);
-    } else {
-      const empty = document.createElement("div");
-      empty.style.fontStyle = "italic";
-      empty.style.fontSize = "13px";
-      empty.textContent = "No port entities available.";
-      wrapper.appendChild(empty);
+      return;
     }
 
-    const card = document.createElement("ha-card");
-    card.appendChild(wrapper);
-
-    const root = document.createElement("div");
-    root.appendChild(card);
-
-    if (this._dialogEntity) {
-      const dialog = this._createDialog();
-      root.appendChild(dialog);
+    if (ports.length === 0) {
+      this.shadowRoot.innerHTML = `
+        <ha-card>
+          <style>${style}</style>
+          <div class="card">
+            ${headerHtml}
+            <div class="empty">No ports to display yet…</div>
+          </div>
+        </ha-card>
+      `;
+      return;
     }
+
+    const portCards = ports
+      .map((p) => {
+        const st = p.st;
+        const on = (st.state || "").toLowerCase() === "on";
+        const cls = on ? "toggle" : "toggle off";
+        const name = this._prettyName(st, p.id);
+        const idx = st.attributes?.Index ?? "";
+        const admin = st.attributes?.Admin ?? "";
+        const oper = st.attributes?.Oper ?? "";
+        const alias = st.attributes?.Alias ?? "";
+        const ip = st.attributes?.IP ?? "";
+        return `
+          <div class="port">
+            <div class="name">${name}</div>
+            <div class="kv"><span>Index</span><span>${idx}</span></div>
+            <div class="kv"><span>Alias</span><span>${alias}</span></div>
+            <div class="kv"><span>Admin</span><span>${admin}</span></div>
+            <div class="kv"><span>Oper</span><span>${oper}</span></div>
+            ${ip ? `<div class="kv"><span>IP</span><span>${ip}</span></div>` : ``}
+            <button class="${cls}" data-entity="${p.id}">${on ? "Turn Off" : "Turn On"}</button>
+          </div>
+        `;
+      })
+      .join("");
 
     this.shadowRoot.innerHTML = `
-      <style>${style}</style>
+      <ha-card>
+        <style>${style}</style>
+        <div class="card">
+          ${headerHtml}
+          <div class="grid">
+            ${portCards}
+          </div>
+        </div>
+      </ha-card>
     `;
-    this.shadowRoot.appendChild(root);
-  }
 
-  _createDialog() {
-    const entityId = this._dialogEntity;
-    const stateObj = this._hass.states[entityId];
-    const backdrop = document.createElement("div");
-    backdrop.classList.add("dialog-backdrop");
-    backdrop.addEventListener("click", (event) => {
-      if (event.target === backdrop) {
-        this._closeDialog();
-      }
+    this.shadowRoot.querySelectorAll("button.toggle").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        const ent = ev.currentTarget.getAttribute("data-entity");
+        if (ent) this._toggle(ent);
+      });
     });
-
-    const dialog = document.createElement("div");
-    dialog.classList.add("dialog");
-
-    const title = document.createElement("h3");
-    title.textContent = stateObj?.attributes?.friendly_name || entityId;
-    dialog.appendChild(title);
-
-    const status = document.createElement("div");
-    status.textContent = `Admin: ${stateObj?.attributes?.admin_status || stateObj?.state}, Oper: ${stateObj?.attributes?.oper_status || "unknown"}`;
-    status.style.fontSize = "13px";
-    dialog.appendChild(status);
-
-    const descriptionInput = document.createElement("input");
-    descriptionInput.type = "text";
-    descriptionInput.classList.add("description-input");
-    descriptionInput.value = stateObj?.attributes?.description || "";
-    dialog.appendChild(descriptionInput);
-
-    const actions = document.createElement("div");
-    actions.classList.add("actions");
-
-    const toggle = document.createElement("button");
-    toggle.classList.add("secondary");
-    toggle.textContent = stateObj?.state === "on" ? "Disable port" : "Enable port";
-    toggle.addEventListener("click", async () => {
-      await this._togglePort(entityId, stateObj?.state !== "on");
-      this._closeDialog();
-    });
-    actions.appendChild(toggle);
-
-    const save = document.createElement("button");
-    save.classList.add("primary");
-    save.textContent = "Save description";
-    save.addEventListener("click", async () => {
-      await this._setDescription(entityId, descriptionInput.value);
-      this._closeDialog();
-    });
-    actions.appendChild(save);
-
-    const cancel = document.createElement("button");
-    cancel.classList.add("secondary");
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => this._closeDialog());
-    actions.appendChild(cancel);
-
-    dialog.appendChild(actions);
-    backdrop.appendChild(dialog);
-    return backdrop;
   }
 
-  _openDialog(entityId) {
-    this._dialogEntity = entityId;
-    this._render();
+  _prettyName(stateObj, entityId) {
+    const n = (stateObj.attributes?.Name || "").toString();
+    return n || entityId;
   }
 
-  _closeDialog() {
-    this._dialogEntity = null;
-    this._render();
-  }
-
-  async _togglePort(entityId, turnOn) {
-    const [domain, service] = turnOn ? ["switch", "turn_on"] : ["switch", "turn_off"];
-    await this._hass.callService(domain, service, { entity_id: entityId });
-  }
-
-  async _setDescription(entityId, description) {
-    await this._hass.callService("switch_manager", "set_port_description", {
-      entity_id: entityId,
-      description,
-    });
+  _toggle(entity_id) {
+    if (!this._hass) return;
+    const st = this._hass.states[entity_id];
+    const isOn = (st?.state || "").toLowerCase() === "on";
+    const svc = isOn ? "turn_off" : "turn_on";
+    this._hass.callService("switch", svc, { entity_id });
   }
 }
 
-if (!customElements.get("switch-manager-card")) {
-  customElements.define("switch-manager-card", SwitchManagerCard);
-}
+// Register with the new tag name
+customElements.define("snmp-switch-manager-card", SwitchManagerCard);
 
-if (window.customCards === undefined) {
-  window.customCards = [];
-}
-
-if (!window.customCards.some((card) => card.type === "switch-manager-card")) {
-  window.customCards.push({
-    type: "switch-manager-card",
-    name: "Switch Manager",
-    description: "Visualise and manage switch ports discovered by the Switch Manager integration.",
-  });
-}
+// Show in card picker
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "snmp-switch-manager-card",
+  name: "SNMP Switch Manager",
+  description: "Front view + port controls for the SNMP switch integration",
+  preview: true,
+});
