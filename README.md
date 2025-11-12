@@ -78,7 +78,7 @@ SNMP Switch Manager discovers an SNMP-enabled switch and exposes each port to [H
 2. Add the card JavaScript as a resource under **Settings → Dashboards → Resources**:
 
    ```yaml
-   url: /hacsfiles/snmp-switch-manager-card/snmp-switch-manager-card.js
+   url: /local/community/snmp-switch-manager-card/snmp-switch-manager-card.js
    type: module
    ```
 
