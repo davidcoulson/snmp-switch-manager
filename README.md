@@ -71,8 +71,6 @@ After installation, restart Home Assistant and add the integration:
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration → SNMP Switch Manager**.
 
-> ⚠️ No `configuration.yaml` entries are required. Remove any legacy YAML after migrating to the UI.
-
 ---
 
 ## Configuration
