@@ -156,7 +156,7 @@ The state of each port entity reflects the interface's administrative status. Tu
 
 ## Support
 
-If your switch does not display correctly, then the integration will need to have specific support added for it. Please open an issue with an text file attachment with the results of an `snmpwalk` command against your switch with a **RW SNMPv2c community string** and any necessary screenshots. Also describe what is incorrect and what it should look like.
+If your switch does not display correctly, then the integration will need to have specific support added for it. Please open an issue with an text file attachment with the results of an `snmpwalk` command against your switch with an **RW SNMPv2c community string** and any necessary screenshots. Also describe what is incorrect and what it should look like.
 
 ### Switches Supported
 - Dell EMC Networking OS6
