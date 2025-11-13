@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.0.1] - 2025-11-13
+## [0.1.0] - 2025-11-13
 ### Added
 - 🔍 Automatic discovery of port count, speed, description, and operational status via SNMP v2c
 - 🔄 Background polling that keeps Home Assistant entities in sync with switch updates
