@@ -161,6 +161,7 @@ If your switch does not display correctly, then the integration will need to hav
 ### Switches Supported
 - Dell EMC Networking OS6
 
+### Open an Issue
 - Open an issue on the [GitHub tracker](https://github.com/OtisPresley/snmp-switch-manager/issues) if you run into problems or have feature requests.
 - Contributions and feedback are welcome!
 
