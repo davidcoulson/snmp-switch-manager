@@ -21,3 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🖼️ Lovelace card that mirrors the switch layout with colour-coded port status and quick actions
 
 ---
+
+## [0.2.0] - 2025-11-13
+### Fixed
+- 🔍 Refactored to work with pysnmp 7.1.24 to work with HA Core 7.1.24
+
+---
