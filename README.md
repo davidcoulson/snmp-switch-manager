@@ -83,12 +83,17 @@ After installation, restart Home Assistant and add the integration:
 
 ## Lovelace card
 
-1. Download the snmp-switch-manager-card.js file from the [SNMP Switch Manager Card](https://github.com/OtisPresley/snmp-switch-manager-card) repository and place it in `www/community/snmp-switch-manager-card/` in Home Assistant.
+1. Download the `snmp-switch-manager-card.js` and  `snmp-switch-manager-card-editor.js` files and place them in `www/community/snmp-switch-manager-card/` in Home Assistant.
 
-2. Add the card JavaScript as a resource under **Settings → Dashboards → Resources**:
+2. Add the card and editor JavaScript as a resource under **Settings → Dashboards → Resources**:
 
    ```yaml
    url: /local/community/snmp-switch-manager-card/snmp-switch-manager-card.js
+   type: module
+   ```
+
+   ```yaml
+   url: /local/community/snmp-switch-manager-card/snmp-switch-manager-card-editor.js
    type: module
    ```
 
@@ -101,9 +106,9 @@ After installation, restart Home Assistant and add the integration:
     type: custom:snmp-switch-manager-card
     title: Core Switch
     view: panel
-    ports_per_row: 12
+    ports_per_row: 24
     info_position: below
-    label_size: 8
+    label_size: 6
     anchor_entity: switch.gi1_0_1
     diagnostics:
       - sensor.hostname
@@ -111,11 +116,22 @@ After installation, restart Home Assistant and add the integration:
       - sensor.manufacturer
       - sensor.model
       - sensor.uptime
+    port_size: 18
+    gap: 10
    ```
 
-   The `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
+   The follows are descriptions of the settings:
+   - `title` sets the text displayed at the tip of the card.
+   - `view` sets the style that the card uses. `list` lists each port in a tile. `panel` show a representation of the front of a switch.
+   - `ports_per_row` sets the number of ports to show in each row on the card when in panel view.
+   - `info_position` displays the Diagnostics and Virtual Interfaces either `above` the phisical ports or `below` them.
+   - `label_size` determines the font size used for the port labels when in panel view.
+   - `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
+   - `diagnostics` is a list of sensors you want to display in the diagnostics area.
+   - `port_size` determines the size of the port images when in panel view.
+   - `gap` determines how far apart the ports are when in panel view.
    
-   Clicking a port opens a dialog with quick actions to toggle the port or edit its description. There is also an alternative `list` view depicted in the      third image below.
+   Clicking a port opens a dialog with quick actions to toggle the port or edit its description. The alternative `list` view depicted in the third image below.
 
     <p float="left">
       <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot2.png" alt="Screenshot 1" width="250"/>
@@ -124,6 +140,7 @@ After installation, restart Home Assistant and add the integration:
     </p>
 
 ---
+
 
 ## Services
 
