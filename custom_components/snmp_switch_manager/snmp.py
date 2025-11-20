@@ -5,20 +5,21 @@ from typing import Any, Dict, Optional, Iterable, Tuple, List
 
 from homeassistant.core import HomeAssistant
 
-# Use synchronous HLAPI (no dependency change) and offload to executor.
-from pysnmp.hlapi import (  # type: ignore[import]
+from .snmp_compat import (
     CommunityData,
     SnmpEngine,
     UdpTransportTarget,
     ContextData,
     ObjectType,
     ObjectIdentity,
-    getCmd,
-    nextCmd,
-    setCmd,
+    get_cmd,
+    next_cmd,
+    set_cmd,
+    OctetString,
+    Integer,
 )
-from pysnmp.proto.rfc1902 import OctetString, Integer  # type: ignore[import]
 
+# Canonical OIDs from const.py (original repo)
 from .const import (
     OID_sysDescr,
     OID_sysName,
@@ -37,58 +38,101 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Extra OIDs used in the original repo’s IP logic (not in const.py)
+# (2) ipAddressIfIndex index suffix encodes IPv4 as: 1.4.a.b.c.d
+OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
+# (3) OSPF-MIB ip address (suffix carries a.b.c.d.<ifIndex>.<area...>)
+OID_ospfIfIpAddress = "1.3.6.1.2.1.14.8.1.1"
+# (4) IP-FORWARD-MIB route column – instance includes dest + prefixLen (vendor-variant index)
+# we read column 9 (.9) because any column shares the same index layout
+OID_routeCol = "1.3.6.1.2.1.4.24.7.1.9"
 
-def _do_get_one(engine, community, target, context, oid: str) -> Optional[str]:
-    it = getCmd(engine, community, target, context, ObjectType(ObjectIdentity(oid)))
-    err_ind, err_stat, err_idx, vbs = next(it)
-    if err_ind or err_stat:
-        return None
-    return str(vbs[0][1])
 
+# ---------- low-level sync helpers offloaded by compat -------------
 
-def _do_next_walk(engine, community, target, context, base_oid: str) -> Iterable[Tuple[str, Any]]:
-    it = nextCmd(
+async def _do_get_one(engine, community, target, context, oid: str) -> Optional[str]:
+    err_ind, err_stat, err_idx, vbs = await get_cmd(
         engine,
         community,
         target,
         context,
-        ObjectType(ObjectIdentity(base_oid)),
-        lexicographicMode=False,
+        ObjectType(ObjectIdentity(oid)),
+        lookupMib=False,  # <<< prevent FS MIB access
     )
-    for err_ind, err_stat, err_idx, vbs in it:
-        if err_ind or err_stat:
+    if err_ind or err_stat:
+        return None
+    for vb in vbs:
+        return str(vb[1])
+    return None
+
+
+async def _do_next_walk(
+    engine, community, target, context, base_oid: str
+) -> Iterable[Tuple[str, Any]]:
+    current_oid = base_oid
+    seen: set[str] = set()
+    while True:
+        err_ind, err_stat, err_idx, vbs = await next_cmd(
+            engine,
+            community,
+            target,
+            context,
+            ObjectType(ObjectIdentity(current_oid)),
+            lexicographicMode=False,
+            lookupMib=False,  # <<< prevent FS MIB access
+        )
+        if err_ind or err_stat or not vbs:
             break
+
+        advanced = False
         for vb in vbs:
             oid_obj, val = vb
-            yield str(oid_obj), val
+            oid_str = str(oid_obj)
+            if not (oid_str == base_oid or oid_str.startswith(base_oid + ".")):
+                return
+            if oid_str in seen:
+                return
+            seen.add(oid_str)
+            yield oid_str, val
+            current_oid = oid_str
+            advanced = True
+
+        if not advanced:
+            break
 
 
-def _do_set_alias(engine, community, target, context, if_index: int, alias: str) -> bool:
-    it = setCmd(
+async def _do_set_alias(
+    engine, community, target, context, if_index: int, alias: str
+) -> bool:
+    err_ind, err_stat, err_idx, _ = await set_cmd(
         engine,
         community,
         target,
         context,
         ObjectType(ObjectIdentity(f"{OID_ifAlias}.{if_index}"), OctetString(alias)),
+        lookupMib=False,  # <<< prevent FS MIB access
     )
-    err_ind, err_stat, err_idx, _ = next(it)
     return (not err_ind) and (not err_stat)
 
 
-def _do_set_admin_status(engine, community, target, context, if_index: int, value: int) -> bool:
-    it = setCmd(
+async def _do_set_admin_status(
+    engine, community, target, context, if_index: int, value: int
+) -> bool:
+    err_ind, err_stat, err_idx, _ = await set_cmd(
         engine,
         community,
         target,
         context,
-        ObjectType(ObjectIdentity(f"1.3.6.1.2.1.2.2.1.7.{if_index}"), Integer(value)),
+        ObjectType(ObjectIdentity(f"{OID_ifAdminStatus}.{if_index}")), Integer(value),
+        lookupMib=False,  # <<< prevent FS MIB access
     )
-    err_ind, err_stat, err_idx, _ = next(it)
     return (not err_ind) and (not err_stat)
 
 
+# ---------- client ----------
+
 class SwitchSnmpClient:
-    """SNMP client using sync HLAPI in an executor; exposes async interface."""
+    """SNMP client using PySNMP v7 asyncio API."""
 
     def __init__(self, hass: HomeAssistant, host: str, community: str, port: int) -> None:
         self.hass = hass
@@ -96,8 +140,11 @@ class SwitchSnmpClient:
         self.community = community
         self.port = port
 
-        self.engine = SnmpEngine()
-        self.target = UdpTransportTarget((host, port), timeout=1.5, retries=1)
+        self.engine = None
+        self.target = None
+        self._target_args = ((host, port),)
+        self._target_kwargs = dict(timeout=1.5, retries=1)
+
         self.community_data = CommunityData(community, mpModel=1)  # v2c
         self.context = ContextData()
 
@@ -108,18 +155,56 @@ class SwitchSnmpClient:
             "ifTable": {},
             "ipIndex": {},
             "ipMask": {},
-            # parsed fields for diagnostics:
             "manufacturer": None,
             "model": None,
             "firmware": None,
         }
 
+    async def _ensure_engine(self) -> None:
+        if self.engine is not None:
+            return
+
+        def _build_engine_with_minimal_preload():
+            eng = SnmpEngine()
+            try:
+                mib_builder = eng.getMibBuilder()
+                try:
+                    mib_builder.setMibSources()  # clear FS sources
+                except TypeError:
+                    pass
+                try:
+                    mib_builder.loadModules("SNMPv2-SMI", "SNMPv2-MIB", "__SNMPv2-MIB", "PYSNMP-SOURCE-MIB")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return eng
+
+        self.engine = await self.hass.async_add_executor_job(_build_engine_with_minimal_preload)
+
+    async def _ensure_target(self) -> None:
+        if self.target is None:
+            self.target = await UdpTransportTarget.create(*self._target_args, **self._target_kwargs)
+
+    # ---------- lifecycle / fetch ----------
+
     async def async_initialize(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+
+        # Build interface table and state first (names, alias, admin/oper)
+        await self._async_walk_interfaces(dynamic_only=False)
+
+        # Build IPv4 maps and attach to interfaces (original repo logic)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+        # System fields
         self.cache["sysDescr"] = await self._async_get_one(OID_sysDescr)
         self.cache["sysName"] = await self._async_get_one(OID_sysName)
         self.cache["sysUpTime"] = await self._async_get_one(OID_sysUpTime)
 
-        # Pull model from ENTITY-MIB if available (pick a base chassis entry).
+        # Model hint (optional)
         ent_models = await self._async_walk(OID_entPhysicalModelName)
         model_hint = None
         for _oid, val in ent_models:
@@ -129,7 +214,7 @@ class SwitchSnmpClient:
                 break
         self.cache["model"] = model_hint
 
-        # Parse Manufacturer & Firmware Revision from sysDescr string if present
+        # Manufacturer / firmware parsing from sysDescr (unchanged behavior)
         sd = (self.cache.get("sysDescr") or "").strip()
         manufacturer = None
         firmware = None
@@ -147,46 +232,50 @@ class SwitchSnmpClient:
         self.cache["manufacturer"] = manufacturer
         self.cache["firmware"] = firmware
 
-        await self._async_walk_interfaces()
-        await self._async_walk_ipv4()
-
-    async def async_poll(self) -> Dict[str, Any]:
-        await self._async_walk_interfaces(dynamic_only=True)
-        await self._async_walk_ipv4()
-        return self.cache
-
-    # ---------- async wrappers over sync calls ----------
-
     async def _async_get_one(self, oid: str) -> Optional[str]:
-        return await self.hass.async_add_executor_job(
-            _do_get_one, self.engine, self.community_data, self.target, self.context, oid
-        )
+        await self._ensure_engine()
+        await self._ensure_target()
+        return await _do_get_one(self.engine, self.community_data, self.target, self.context, oid)
 
     async def _async_walk(self, base_oid: str) -> list[tuple[str, Any]]:
-        def _collect():
-            return list(_do_next_walk(self.engine, self.community_data, self.target, self.context, base_oid))
-        return await self.hass.async_add_executor_job(_collect)
+        await self._ensure_engine()
+        await self._ensure_target()
+        out: list[tuple[str, Any]] = []
+        async for oid_str, val in _do_next_walk(self.engine, self.community_data, self.target, self.context, base_oid):
+            out.append((oid_str, val))
+        return out
 
     async def _async_walk_interfaces(self, dynamic_only: bool = False) -> None:
         if not dynamic_only:
             self.cache["ifTable"] = {}
 
+            # Indexes
             for oid, val in await self._async_walk(OID_ifIndex):
-                idx = int(str(val))
+                idx = int(oid.split(".")[-1])
                 self.cache["ifTable"][idx] = {"index": idx}
 
+            # Descriptions
             for oid, val in await self._async_walk(OID_ifDescr):
                 idx = int(oid.split(".")[-1])
                 self.cache["ifTable"].setdefault(idx, {})["descr"] = str(val)
 
+            # Names
             for oid, val in await self._async_walk(OID_ifName):
                 idx = int(oid.split(".")[-1])
                 self.cache["ifTable"].setdefault(idx, {})["name"] = str(val)
 
+            # Aliases
             for oid, val in await self._async_walk(OID_ifAlias):
                 idx = int(oid.split(".")[-1])
                 self.cache["ifTable"].setdefault(idx, {})["alias"] = str(val)
 
+            # Display name preference from original repo
+            for idx, rec in list(self.cache["ifTable"].items()):
+                nm = (rec.get("name") or "").strip()
+                ds = (rec.get("descr") or "").strip()
+                rec["display_name"] = nm or ds or f"ifIndex {idx}"
+
+        # Dynamic state only
         for oid, val in await self._async_walk(OID_ifAdminStatus):
             idx = int(oid.split(".")[-1])
             self.cache["ifTable"].setdefault(idx, {})["admin"] = int(val)
@@ -197,19 +286,15 @@ class SwitchSnmpClient:
 
     async def _async_walk_ipv4(self) -> None:
         """
-        Populate IPv4 maps for attributes.
-        1) Fill from legacy IP-MIB (ipAdEnt*) if present (keeps existing behavior).
-        2) Add IPv4s by parsing IP from ipAddressIfIndex (1.3.6.1.2.1.4.34.1.3)
-           where instance suffix is: 1.4.a.b.c.d = ifIndex
-        3) Add IPv4s from OSPF-MIB ospfIfIpAddress (1.3.6.1.2.1.14.8.1.1)
-           where suffix is: a.b.c.d.<ifIndex>.<area...> = a.b.c.d
-        4) Resolve mask bits by parsing route prefixes from IP-FORWARD-MIB
-           (1.3.6.1.2.1.4.24.7.1.9) – instance carries dest IPv4 and prefixLen:
-             ... .1.4.<a>.<b>.<c>.<d>.<prefixLen>.2.0.0.1.4.<nextHop...>
-           Choose the most specific network that contains each IP.
+        ORIGINAL REPO LOGIC, adapted to asyncio:
+        1) Legacy IP-MIB ipAdEnt* for IPv4 list + masks when present.
+        2) IP-MIB ipAddressIfIndex: parse IPv4 from instance suffix (1.4.a.b.c.d).
+        3) OSPF-MIB ospfIfIpAddress: also yields a.b.c.d with suffix carrying ifIndex.
+        4) Derive mask bits by parsing IP-FORWARD-MIB route instances (.7.1.9) and
+           choosing the most specific network that contains each discovered IP.
         """
         ip_index: Dict[str, int] = {}
-        ip_mask: Dict[str, str] = {}  # may be filled only by step 1 or 4
+        ip_mask: Dict[str, str] = {}  # primarily from (1) and (4)
 
         # ---- (1) Legacy table: ipAdEnt* ----
         legacy_addrs = await self._async_walk(OID_ipAdEntAddr)
@@ -230,26 +315,25 @@ class SwitchSnmpClient:
                 ip = ".".join(parts)
                 ip_mask[ip] = str(val)
 
-            # We intentionally do NOT return here; continue collecting more IPs below.
-
-        # ---- (2) Modern: parse IP from the OID of ipAddressIfIndex ----
-        OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
+        # ---- (2) IP-MIB ipAddressIfIndex: parse instance suffix (1.4.a.b.c.d)
         try:
             for oid, val in await self._async_walk(OID_ipAddressIfIndex):
-                try:
-                    suffix = oid[len(OID_ipAddressIfIndex) + 1 :]  # ".1.4.a.b.c.d"
-                    parts = [int(x) for x in suffix.split(".")]
-                    if len(parts) >= 6 and parts[0] == 1 and parts[1] == 4:
-                        a, b, c, d = parts[2], parts[3], parts[4], parts[5]
+                suffix = oid[len(OID_ipAddressIfIndex) + 1 :]
+                parts = [int(x) for x in suffix.split(".") if x]
+                for i in range(len(parts) - 6 + 1):
+                    if parts[i] == 1 and parts[i + 1] == 4:
+                        a, b, c, d = parts[i + 2 : i + 6]
                         ip = f"{a}.{b}.{c}.{d}"
-                        ip_index.setdefault(ip, int(val))
-                except Exception:
-                    continue
+                        try:
+                            idx = int(val)
+                            ip_index.setdefault(ip, idx)
+                        except Exception:
+                            pass
+                        break
         except Exception:
-            pass  # table may be absent; ignore quietly
+            pass  # IP-MIB may be absent
 
-        # ---- (3) OSPF: loopbacks exposed via ospfIfIpAddress ----
-        OID_ospfIfIpAddress = "1.3.6.1.2.1.14.8.1.1"
+        # ---- (3) OSPF-MIB ospfIfIpAddress: suffix a.b.c.d.<ifIndex>.<area...>
         try:
             for oid, val in await self._async_walk(OID_ospfIfIpAddress):
                 try:
@@ -263,12 +347,10 @@ class SwitchSnmpClient:
                 except Exception:
                     continue
         except Exception:
-            pass  # OSPF MIB may be absent
+            pass  # OSPF-MIB may be absent
 
-        # ---- (4) Derive mask bits from IP-FORWARD-MIB route index (vendor flavor) ----
-        # We parse destinations/prefixLen from the INSTANCE of 1.3.6.1.2.1.4.24.7.1.9
-        # (any column in that table shares the same index; .9 works well)
-        OID_routeCol = "1.3.6.1.2.1.4.24.7.1.9"
+        # ---- (4) Derive mask bits from IP-FORWARD-MIB route instances (.7.1.9)
+        route_prefixes: List[Tuple[int, int]] = []
 
         def _bits_to_mask(bits: int) -> str:
             if bits <= 0:
@@ -282,18 +364,13 @@ class SwitchSnmpClient:
             a, b, c, d = (int(x) for x in ip.split("."))
             return (a << 24) | (b << 16) | (c << 8) | d
 
-        def _int_to_ip(x: int) -> str:
-            return ".".join(str((x >> s) & 0xFF) for s in (24, 16, 8, 0))
-
-        # Collect list of (network_int, bits)
-        route_prefixes: List[Tuple[int, int]] = []
         try:
             for oid, _val in await self._async_walk(OID_routeCol):
                 try:
-                    suffix = oid[len(OID_routeCol) + 1 :]  # "...1.4.a.b.c.d.bits.2.0.0.1.4.x.x.x.x"
-                    parts = [int(x) for x in suffix.split(".")]
-                    # Find a '1,4' pair then 4 octets and a plausible bits (0..32)
-                    for i in range(len(parts) - 6):
+                    suffix = oid[len(OID_routeCol) + 1 :]
+                    parts = [int(x) for x in suffix.split(".") if x]
+
+                    for i in range(len(parts) - 7):
                         if parts[i] == 1 and parts[i + 1] == 4:
                             a, b, c, d = parts[i + 2 : i + 6]
                             bits = parts[i + 6] if i + 6 < len(parts) else None
@@ -305,41 +382,114 @@ class SwitchSnmpClient:
                 except Exception:
                     continue
         except Exception:
-            pass  # table may be absent; that's okay
+            pass  # table may be absent on some vendors
 
-        # Choose the most specific matching prefix for each discovered IP
         if route_prefixes and ip_index:
-            # Sort prefixes by descending specificity once
             route_prefixes.sort(key=lambda t: t[1], reverse=True)
-            for ip in ip_index.keys():
+            for ip in list(ip_index.keys()):
                 ip_int = _ip_to_int(ip)
-                # pick first (i.e., most specific) whose network contains ip
                 for net_int, bits in route_prefixes:
                     mask_int = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if bits else 0
                     if bits == 0 or (ip_int & mask_int) == (net_int & mask_int):
                         ip_mask[ip] = _bits_to_mask(bits)
                         break
 
-        # Commit findings
+        # Commit maps to cache
         if ip_index:
             self.cache["ipIndex"] = ip_index
         if ip_mask:
             self.cache["ipMask"] = ip_mask
 
+    def _attach_ipv4_to_interfaces(self) -> None:
+        if_table: Dict[int, Dict[str, Any]] = self.cache.get("ifTable", {})
+        ip_idx: Dict[str, Optional[int]] = self.cache.get("ipIndex", {})
+        ip_mask: Dict[str, str] = self.cache.get("ipMask", {})
+
+        # Clear prior fields to avoid stale data
+        for rec in if_table.values():
+            for k in (
+                "ipv4", "ip", "netmask", "cidr",
+                "ip_address", "ipv4_address", "ipv4_netmask", "ipv4_cidr",
+                "ip_cidr_str",
+            ):
+                rec.pop(k, None)
+
+        def _mask_to_prefix(mask: str | None) -> Optional[int]:
+            if not mask:
+                return None
+            try:
+                parts = [int(p) for p in mask.split(".")]
+                if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+                    return None
+                bits = "".join(f"{p:08b}" for p in parts)
+                if "01" in bits:
+                    return None
+                return bits.count("1")
+            except Exception:
+                return None
+
+        # Attach; if mask present convert to prefix bits for /cidr string
+        for ip, idx in ip_idx.items():
+            if not idx:
+                continue
+            rec = if_table.get(idx)
+            if not rec:
+                continue
+            mask = ip_mask.get(ip)
+            prefix = _mask_to_prefix(mask)
+            rec.setdefault("ipv4", []).append({"ip": ip, "netmask": mask, "cidr": prefix})
+
+        # Convenience single-address fields for UI (unchanged behavior)
+        for rec in if_table.values():
+            addrs = rec.get("ipv4") or []
+            if len(addrs) == 1:
+                ip = addrs[0]["ip"]
+                mask = addrs[0]["netmask"]
+                prefix = addrs[0]["cidr"]
+                rec["ip"] = ip
+                rec["netmask"] = mask
+                rec["cidr"] = prefix
+                rec["ip_address"] = ip
+                rec["ipv4_address"] = ip
+                rec["ipv4_netmask"] = mask
+                rec["ipv4_cidr"] = prefix
+                if prefix is not None:
+                    rec["ip_cidr_str"] = f"{ip}/{prefix}"
+
+    async def async_refresh_all(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+        await self._async_walk_interfaces(dynamic_only=False)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+    async def async_refresh_dynamic(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+        await self._async_walk_interfaces(dynamic_only=True)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+    # ---------- coordinator hook ----------
+    async def async_poll(self) -> Dict[str, Any]:
+        await self.async_refresh_dynamic()
+        return self.cache
+
+    # ---------- mutations ----------
     async def set_alias(self, if_index: int, alias: str) -> bool:
-        ok = await self.hass.async_add_executor_job(
-            _do_set_alias, self.engine, self.community_data, self.target, self.context, if_index, alias
-        )
+        await self._ensure_engine()
+        await self._ensure_target()
+        ok = await _do_set_alias(self.engine, self.community_data, self.target, self.context, if_index, alias)
         if ok:
-            self.cache["ifTable"].setdefault(if_index, {})["alias"] = alias
+            self.cache.setdefault("ifTable", {}).setdefault(if_index, {})["alias"] = alias
         else:
             _LOGGER.warning("Failed to set alias via SNMP on ifIndex %s", if_index)
         return ok
 
     async def set_admin_status(self, if_index: int, value: int) -> bool:
-        return await self.hass.async_add_executor_job(
-            _do_set_admin_status, self.engine, self.community_data, self.target, self.context, if_index, value
-        )
+        await self._ensure_engine()
+        await self._ensure_target()
+        return await _do_set_admin_status(self.engine, self.community_data, self.target, self.context, if_index, value)
 
 
 # ---------- helpers for config_flow ----------
