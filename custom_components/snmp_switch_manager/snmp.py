@@ -301,28 +301,45 @@ class SwitchSnmpClient:
 
         def _normalize_ipv4(val: Any) -> str:
             """Convert SNMP IPv4 values to dotted-quad strings.
-
-            Some vendors (e.g., Cisco CBS series) return ipAdEntAddr/ipAdEntNetMask
+        
+            Some vendors (e.g., Cisco CBS series, Arista) return ipAdEntAddr/ipAdEntNetMask
             as raw octets instead of a printable IpAddress. This helper keeps existing
             behavior for vendors that already return dotted strings."""
             s = str(val)
             parts = s.split(".")
             if len(parts) == 4 and all(p.isdigit() for p in parts):
+                # Already a normal dotted-decimal IPv4 string
                 return s
-
+        
             # Try to interpret as 4 raw octets
             b: Optional[bytes] = None
-            try:
-                b = bytes(val)  # pysnmp types often support __bytes__
-            except Exception:
+        
+            # Fast path for native bytes/bytearray
+            if isinstance(val, (bytes, bytearray)):
+                b = bytes(val)
+            else:
                 try:
-                    b = val.asOctets()  # type: ignore[attr-defined]
+                    # pysnmp types often support __bytes__
+                    b = bytes(val)  # type: ignore[arg-type]
                 except Exception:
-                    b = None
-
+                    # On some vendors (e.g. Arista) IpAddress may come back
+                    # as a 4-character Python str like "C;U[" – treat each
+                    # character as a raw octet.
+                    if isinstance(val, str):
+                        try:
+                            b = val.encode("latin-1")
+                        except Exception:
+                            b = None
+                    if b is None:
+                        try:
+                            b = val.asOctets()  # type: ignore[attr-defined]
+                        except Exception:
+                            b = None
+        
             if b and len(b) == 4:
                 return ".".join(str(x) for x in b)
-
+        
+            # Fallback: give the original string representation
             return s
 
         # ---- (1) Legacy table: ipAdEnt* ----
