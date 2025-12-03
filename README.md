@@ -195,7 +195,7 @@ If your switch does not display correctly, then the integration will need to hav
 ### Switches Working/Supported
 - Dell EMC Networking OS6
 - Zyxel
-- D-Link ZDGS
+- D-Link DGS
 - Cisco CBS and SG
 - Arista
 
