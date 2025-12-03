@@ -194,8 +194,10 @@ If your switch does not display correctly, then the integration will need to hav
 
 ### Switches Working/Supported
 - Dell EMC Networking OS6
-- Zyxel GS1910-24
-- Cisco CBS250
+- Zyxel
+- D-Link ZDGS
+- Cisco CBS and SG
+- Arista
 
 ### Open an Issue
 - Open an issue on the [GitHub tracker](https://github.com/OtisPresley/snmp-switch-manager/issues) if you run into problems or have feature requests.
