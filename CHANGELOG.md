@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.3.0RC2] - 2025-11-21
+## [0.3.0RC2] - 2025-12-2
 ### Added
 - 🎚️ Support for Cisco CBS250
 - 🎚️ Support for Cisco CBS250 firmware sensor
