@@ -45,3 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🚧 Fixed issue causing inability to operate the port switches
 
 ---
+
+## [0.3.0] - 2025-12-7
+### Added
+- 🎚️ Support for Cisco CBS and SG
+- 🎚️ Support for Cisco CBS250 firmware sensor
+- 🎚️ Initial support for Arista
+- 🎚️ Support for Juniper EX2200
+- 🏷️ Updated README
+### Fixed
+- 🚧 Fixed issue causing inability to operate the port switches
+- 🚧 Fixed naming of switch and sensor entities to include the switch name (must delete switch and readd it)
+
+---
