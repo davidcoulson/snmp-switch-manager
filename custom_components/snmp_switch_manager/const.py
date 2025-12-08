@@ -37,3 +37,9 @@ OID_entPhysicalModelName = "1.3.6.1.2.1.47.1.1.1.1.13"
 # ENTITY-MIB — CBS350 base-chassis software revision (see Cisco CBS350 SNMP OIDs doc)
 # This is entPhysicalSoftwareRev with entPhysicalIndex 67109120
 OID_entPhysicalSoftwareRev_CBS350 = "1.3.6.1.2.1.47.1.1.1.1.10.67109120"
+
+# MikroTik RouterOS (MIKROTIK-MIB .1.3.6.1.4.1.14988.1.1.7)
+# routerBoardInfoSoftwareVersion: "7.20.6"
+OID_mikrotik_software_version = "1.3.6.1.4.1.14988.1.1.7.4.0"
+# routerBoardInfoModel: "CRS305-1G-4S+"
+OID_mikrotik_model = "1.3.6.1.4.1.14988.1.1.7.8.0"
