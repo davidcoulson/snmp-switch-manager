@@ -51,10 +51,38 @@ Add real-time and cumulative traffic visibility for every network interface.
 - ✅ Default exposure as **per-port attributes**
 - ✅ Optional exposure as **dedicated diagnostic sensors**
 
+### 🌡️ Switch Environmentals & CPU / Memory Usage  
+**Priority:** 🔴 High  
+**Target Release:** v0.4.0  
+**Tracking:** [`#roadmap-switch-environmentals`](./CHANGELOG.md#roadmap-switch-environmentals)
+
+Add environmental monitoring and system performance telemetry for supported switches and routers.
+
+#### Planned Capabilities
+- 🌡️ **Temperature Monitoring**  
+  - CPU, PSU, and chassis temperature sensors (when available via SNMP)  
+- 🧠 **CPU Utilization**  
+  - Current system CPU usage percentage  
+- 💾 **Memory Utilization**  
+  - Current system memory usage percentage  
+
+#### Design Goals
+- ✅ Works across **all supported platforms**
+  - Cisco SG / CBS  
+  - Arista  
+  - Juniper (EX series)  
+  - OPNsense / pfSense  
+- ✅ Uses **standard SNMP environmental and performance OIDs**
+- ✅ **Automatic unit handling**
+  - Celsius ↔ Fahrenheit conversion where applicable  
+- ✅ **Efficient polling** via the existing coordinator
+- ✅ **Minimal Home Assistant performance impact**
+- ✅ Default exposure as **dedicated sensor entities**
+
 #### Immediate Capabilities Enabled by This Feature
-- 📈 Per-port **historical traffic graphs** (via Home Assistant statistics)
-- 🚨 Per-port **bandwidth threshold alerting** via automations
-- 📊 **Live throughput display** in the Switch Manager UI
+- 📈 **Historical temperature and utilization graphs** (via Home Assistant statistics)
+- 🚨 **Temperature & performance alerting** via automations
+- 📊 **Live environmental and system load display** in the Switch Manager UI
 
 ---
 
