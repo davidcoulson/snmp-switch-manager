@@ -51,6 +51,8 @@ Add real-time and cumulative traffic visibility for every network interface.
 - ✅ Default exposure as **per-port attributes**
 - ✅ Optional exposure as **dedicated diagnostic sensors**
 
+---
+
 ### 🌡️ Switch Environmentals & CPU / Memory Usage  
 **Priority:** 🔴 High  
 **Target Release:** v0.4.0  
@@ -86,6 +88,44 @@ Add environmental monitoring and system performance telemetry for supported swit
 
 ---
 
+### ⚡ Power over Ethernet (PoE) Statistics  
+**Priority:** 🔴 High  
+**Target Release:** v0.4.0  
+**Tracking:** [`#roadmap-poe-statistics`](./CHANGELOG.md#roadmap-poe-statistics)
+
+Add real-time **PoE power usage, status, and budget monitoring** for supported PoE-capable switches.
+
+#### Planned Capabilities
+- ⚡ **Per-Port Power Usage (Watts)**  
+  - Real-time PoE draw per interface  
+- 🔌 **Per-Port PoE Status**  
+  - Enabled / Disabled / Fault state  
+- 🧮 **Total PoE Budget Usage**  
+  - Overall switch PoE utilization percentage  
+- 📊 **Available vs Used Power Budget**  
+  - Remaining PoE headroom for new devices  
+
+#### Design Goals
+- ✅ Uses **standard and vendor-specific PoE SNMP OIDs**
+  - Cisco  
+  - Arista  
+  - Juniper  
+  - MikroTik (where supported)  
+- ✅ **Automatic unit normalization** (W, mW, percentage)
+- ✅ **Efficient polling** via the existing coordinator
+- ✅ **Minimal Home Assistant performance impact**
+- ✅ Default exposure as:
+  - 📎 **Attributes on port switch entities**, and/or  
+  - ⚙️ **Dedicated diagnostic sensor entities**
+
+#### Immediate Capabilities Enabled by This Feature
+- 🚨 **PoE overload and fault alerting**
+- 📈 **Historical PoE power usage graphs**
+- 🔍 **Fast detection of non-responsive powered devices**
+- 📊 **Live PoE power display** in the Switch Manager UI
+
+---
+
 ## 📦 Backlog (Advanced / Long-Term)
 
-- 🧮 **Nothing here yet**  
+- 🧮 **Nothing here yet**
