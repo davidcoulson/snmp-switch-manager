@@ -30,6 +30,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     firmware = client.cache.get("firmware") or "Unknown"
 
     hostname = client.cache.get("sysName")
+    host_label = hostname or entry.data.get("name") or client.host
     uptime_ticks = client.cache.get("sysUpTime")
 
     # Convert sysUpTime (hundredths of seconds) to human string
@@ -49,28 +50,29 @@ async def async_setup_entry(hass, entry, async_add_entities):
         manufacturer=manufacturer if manufacturer != "Unknown" else None,
         model=model if model != "Unknown" else None,
         sw_version=firmware if firmware != "Unknown" else None,
-        name=hostname or entry.data.get("name") or client.host,
+        name=host_label,
     )
 
     entities = [
-        SimpleTextSensor(coordinator, entry, "manufacturer", manufacturer, device_info),
-        SimpleTextSensor(coordinator, entry, "model", model, device_info),
-        SimpleTextSensor(coordinator, entry, "firmware", firmware, device_info),
-        SimpleTextSensor(coordinator, entry, "uptime", _uptime_human(uptime_ticks), device_info),
-        SimpleTextSensor(coordinator, entry, "hostname", hostname or client.host, device_info),
+        SimpleTextSensor(coordinator, entry, "manufacturer", manufacturer, device_info, host_label),
+        SimpleTextSensor(coordinator, entry, "model", model, device_info, host_label),
+        SimpleTextSensor(coordinator, entry, "firmware", firmware, device_info, host_label),
+        SimpleTextSensor(coordinator, entry, "uptime", _uptime_human(uptime_ticks), device_info, host_label),
+        SimpleTextSensor(coordinator, entry, "hostname", hostname or client.host, device_info, host_label),
     ]
     async_add_entities(entities)
-
 
 class SimpleTextSensor(CoordinatorEntity, SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator, entry, key, value, device_info: DeviceInfo):
+    def __init__(self, coordinator, entry, key, value, device_info: DeviceInfo, hostname: str):
         super().__init__(coordinator)
         self._key = key
         self._value = value
+        self._hostname = hostname
         self._attr_unique_id = f"{entry.entry_id}-{key}"
-        self._attr_name = SENSOR_TYPES[key]
+        # Include hostname so entity_id becomes e.g. sensor.switch1_firmware_revision
+        self._attr_name = f"{hostname} {SENSOR_TYPES[key]}"
         self._attr_device_info = device_info
 
     @property
