@@ -35,6 +35,8 @@ from .const import (
     OID_ipAdEntNetMask,
     OID_entPhysicalModelName,
     OID_entPhysicalSoftwareRev_CBS350,
+    OID_mikrotik_software_version,
+    OID_mikrotik_model,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -243,6 +245,27 @@ class SwitchSnmpClient:
                 sw_rev = None
             if sw_rev:
                 firmware = sw_rev.strip() or firmware
+
+        # MikroTik RouterOS: override using MIKROTIK-MIB when detected
+        if "mikrotik" in sd.lower() or "routeros" in sd.lower():
+            # Manufacturer should be a clean vendor name, not "RouterOS".
+            manufacturer = "MikroTik"
+
+            # Firmware version from routerBoardInfoSoftwareVersion (e.g. "7.20.6")
+            try:
+                mk_ver = await self._async_get_one(OID_mikrotik_software_version)
+            except Exception:
+                mk_ver = None
+            if mk_ver:
+                firmware = mk_ver.strip() or firmware
+
+            # Model name from routerBoardInfoModel (e.g. "CRS305-1G-4S+")
+            try:
+                mk_model = await self._async_get_one(OID_mikrotik_model)
+            except Exception:
+                mk_model = None
+            if mk_model:
+                self.cache["model"] = mk_model.strip() or self.cache.get("model")
 
         self.cache["manufacturer"] = manufacturer
         self.cache["firmware"] = firmware
