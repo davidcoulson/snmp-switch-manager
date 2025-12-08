@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2025-12-7
+### Added
+- 🎚️ Support for Mikrotik RouterOS
+
 <!-- ROADMAP ANCHOR LINKS -->
 
 <a name="roadmap-bandwidth-sensors"></a>
