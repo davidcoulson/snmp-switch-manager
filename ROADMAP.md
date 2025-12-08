@@ -10,7 +10,7 @@ This roadmap reflects **active development priorities** and **realistic implemen
 > 🔗 See related releases in [`CHANGELOG.md`](./CHANGELOG.md)
 
 - ✅ Vendor-specific interface filtering  
-  - Juniper EX (ge-0/0/X physical ports, VLAN rules, IP-based logical ports)
+  - Juniper EX (ge-0/0/X physical ports, VLAN rules, IP-based logical ports)  
   - Cisco SG (Fa/Gi physical ports, VLAN rules, IP-based logical ports)
 - ✅ Hostname-prefixed entity names  
   - `switch.switch1_gi1_0_1`  
@@ -61,5 +61,3 @@ Add real-time and cumulative traffic visibility for every network interface.
 ## 📦 Backlog (Advanced / Long-Term)
 
 - 🧮 **Nothing here yet**  
-
----
