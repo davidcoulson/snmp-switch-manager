@@ -46,16 +46,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     manufacturer = (client.cache.get("manufacturer") or "").lower()
     sys_descr = (client.cache.get("sysDescr") or "").lower()
 
-    # Cisco SG / Cisco Small Business family:
-    # - manufacturer usually includes "cisco"
-    # - sysDescr often mentions "sg" (e.g. "SG300", "SG350", "SG500") or "small business"/"business"
-    is_cisco_sg = "cisco" in manufacturer and (
-        " sg" in sys_descr
-        or "sg3" in sys_descr
-        or "sg2" in sys_descr
-        or "small business" in sys_descr
-        or "business" in sys_descr
-    )
+    # Cisco SG family
+    is_cisco_sg = manufacturer.startswith("sg") and sys_descr.startswith("sg")
 
     # Detect Junos / Juniper EX series
     manufacturer = (client.cache.get("manufacturer") or "").lower()
