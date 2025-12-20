@@ -46,16 +46,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     manufacturer = (client.cache.get("manufacturer") or "").lower()
     sys_descr = (client.cache.get("sysDescr") or "").lower()
 
-    # Cisco SG / Cisco Small Business family:
-    # - manufacturer usually includes "cisco"
-    # - sysDescr often mentions "sg" (e.g. "SG300", "SG350", "SG500") or "small business"/"business"
-    is_cisco_sg = "cisco" in manufacturer and (
-        " sg" in sys_descr
-        or "sg3" in sys_descr
-        or "sg2" in sys_descr
-        or "small business" in sys_descr
-        or "business" in sys_descr
-    )
+    # Cisco SG family
+    is_cisco_sg = manufacturer.startswith("sg") and sys_descr.startswith("sg")
 
     # Detect Junos / Juniper EX series
     manufacturer = (client.cache.get("manufacturer") or "").lower()
@@ -82,25 +74,38 @@ async def async_setup_entry(hass, entry, async_add_entities):
             # Only create PortChannel entity if configured (alias or IP present)
             continue
 
+        # Get interface details
+        name = raw_name.strip()
+        lower_name = name.lower()
+        admin = row.get("admin")
+        oper = row.get("oper")
+        has_ip = bool(ip_str)
+        include = False
+        
         # Cisco SG interface selection rules
         if is_cisco_sg:
-            name = raw_name.strip()
-            lower_name = name.lower()
-            admin = row.get("admin")
-            oper = row.get("oper")
-            has_ip = bool(ip_str)
-            include = False
 
             # 1) Physical ports: names starting with Fa or Gi (case-insensitive)
             if lower_name.startswith("fa") or lower_name.startswith("gi"):
-                include = True
+                if oper != 6:
+                  include = True
 
             # 2) VLAN interfaces that are operationally up or administratively disabled
-            elif lower_name.startswith("vlan"):
-                if oper == 1 or admin == 2:
+            # and have an IP address configured (avoiding duplicate entry)
+            elif lower_name.isdigit():
+                if (oper == 1 or admin == 2) and has_ip:
+                    # We modify the name because on Cisco VLAN interface names are unprefixed digits
+                    # which make for a confusing interface.
+                    raw_name = "VLAN " + raw_name
                     include = True
 
-            # 3) Any other interface with an IP address configured
+            # 3) Link Access Group interfaces should also be displayed if operationally up or
+            # administratively disabled.
+            elif lower_name.startswith("po"):
+                if oper == 1 or admin == 2:
+                    include = True
+            
+            # 4) Any other interface with an IP address configured
             elif has_ip:
                 include = True
 
@@ -110,12 +115,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
         # Junos (e.g. EX2200) interface selection rules
         if is_junos:
-            name = raw_name.strip()
-            lower_name = name.lower()
-            admin = row.get("admin")
-            oper = row.get("oper")
-            has_ip = bool(ip_str)
-            include = False
 
             # 1) Physical front-panel ports: ge-0/0/X (no subinterface suffix)
             if lower_name.startswith("ge-") and "." not in name:
