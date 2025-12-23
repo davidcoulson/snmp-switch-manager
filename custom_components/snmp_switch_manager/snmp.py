@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional, Iterable, Tuple, List
 
@@ -30,6 +31,8 @@ from .const import (
     OID_ifOperStatus,
     OID_ifName,
     OID_ifAlias,
+    OID_ifSpeed,
+    OID_ifHighSpeed,
     OID_ipAdEntAddr,
     OID_ipAdEntIfIndex,
     OID_ipAdEntNetMask,
@@ -37,6 +40,11 @@ from .const import (
     OID_entPhysicalSoftwareRev_CBS350,
     OID_mikrotik_software_version,
     OID_mikrotik_model,
+    OID_entPhysicalMfgName_Zyxel,
+    OID_zyxel_firmware_version,
+    # ✅ FIX: these were referenced below but not imported, so VLAN discovery always failed
+    OID_dot1dBasePortIfIndex,
+    OID_dot1qPvid,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,11 +148,12 @@ async def _do_set_admin_status(
 class SwitchSnmpClient:
     """SNMP client using PySNMP v7 asyncio API."""
 
-    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int) -> None:
+    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int, custom_oids: Optional[Dict[str, str]] = None) -> None:
         self.hass = hass
         self.host = host
         self.community = community
         self.port = port
+        self.custom_oids: Dict[str, str] = dict(custom_oids or {})
 
         self.engine = None
         self.target = None
@@ -165,6 +174,17 @@ class SwitchSnmpClient:
             "model": None,
             "firmware": None,
         }
+
+    def _custom_oid(self, key: str) -> Optional[str]:
+        val = (self.custom_oids or {}).get(key)
+        if not val:
+            return None
+        v = str(val).strip()
+        if not v:
+            return None
+        if v.startswith("."):
+            v = v[1:]
+        return v
 
     async def _ensure_engine(self) -> None:
         if self.engine is not None:
@@ -207,8 +227,8 @@ class SwitchSnmpClient:
 
         # System fields
         self.cache["sysDescr"] = await self._async_get_one(OID_sysDescr)
-        self.cache["sysName"] = await self._async_get_one(OID_sysName)
-        self.cache["sysUpTime"] = await self._async_get_one(OID_sysUpTime)
+        self.cache["sysName"] = await self._async_get_one(self._custom_oid("hostname") or OID_sysName)
+        self.cache["sysUpTime"] = await self._async_get_one(self._custom_oid("uptime") or OID_sysUpTime)
 
         # Model hint (optional)
         ent_models = await self._async_walk(OID_entPhysicalModelName)
@@ -246,6 +266,22 @@ class SwitchSnmpClient:
             if sw_rev:
                 firmware = sw_rev.strip() or firmware
 
+        # Zyxel: prefer vendor-specific manufacturer/firmware OIDs when detected
+        if "zyxel" in sd.lower():
+            try:
+                zy_mfg = await self._async_get_one(OID_entPhysicalMfgName_Zyxel)
+            except Exception:
+                zy_mfg = None
+            if zy_mfg:
+                manufacturer = zy_mfg.strip() or manufacturer
+
+            try:
+                zy_fw = await self._async_get_one(OID_zyxel_firmware_version)
+            except Exception:
+                zy_fw = None
+            if zy_fw:
+                firmware = zy_fw.strip() or firmware
+
         # MikroTik RouterOS: override using MIKROTIK-MIB when detected
         if "mikrotik" in sd.lower() or "routeros" in sd.lower():
             # Manufacturer should be a clean vendor name, not "RouterOS".
@@ -266,6 +302,34 @@ class SwitchSnmpClient:
                 mk_model = None
             if mk_model:
                 self.cache["model"] = mk_model.strip() or self.cache.get("model")
+
+        # Custom OIDs: per-device overrides take precedence over vendor logic and generic parsing
+        try:
+            mfg_oid = self._custom_oid("manufacturer")
+            if mfg_oid:
+                mfg_val = await self._async_get_one(mfg_oid)
+                if mfg_val:
+                    manufacturer = mfg_val.strip() or manufacturer
+        except Exception:
+            pass
+
+        try:
+            fw_oid = self._custom_oid("firmware")
+            if fw_oid:
+                fw_val = await self._async_get_one(fw_oid)
+                if fw_val:
+                    firmware = fw_val.strip() or firmware
+        except Exception:
+            pass
+
+        try:
+            model_oid = self._custom_oid("model")
+            if model_oid:
+                model_val = await self._async_get_one(model_oid)
+                if model_val:
+                    self.cache["model"] = model_val.strip() or self.cache.get("model")
+        except Exception:
+            pass
 
         self.cache["manufacturer"] = manufacturer
         self.cache["firmware"] = firmware
@@ -306,6 +370,58 @@ class SwitchSnmpClient:
             for oid, val in await self._async_walk(OID_ifAlias):
                 idx = int(oid.split(".")[-1])
                 self.cache["ifTable"].setdefault(idx, {})["alias"] = str(val)
+
+            # Speeds (prefer ifHighSpeed where present; fall back to ifSpeed)
+            for oid, val in await self._async_walk(OID_ifSpeed):
+                idx = int(oid.split(".")[-1])
+                try:
+                    bps = int(val)
+                except Exception:
+                    continue
+                if bps > 0:
+                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = bps
+
+            for oid, val in await self._async_walk(OID_ifHighSpeed):
+                idx = int(oid.split(".")[-1])
+                try:
+                    mbps = int(val)
+                except Exception:
+                    continue
+                # ifHighSpeed is Mbps; prefer it when non-zero
+                if mbps > 0:
+                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = mbps * 1_000_000
+
+            # VLAN (PVID) mapping via BRIDGE-MIB / Q-BRIDGE-MIB
+            # Map ifIndex -> dot1dBasePort -> dot1qPvid (untagged VLAN)
+            try:
+                baseport_by_ifindex: Dict[int, int] = {}
+                for oid, val in await self._async_walk(OID_dot1dBasePortIfIndex):
+                    # Instance: ...1.4.1.2.<basePort>
+                    base_port = int(oid.split(".")[-1])
+                    if_index = int(val)
+                    if if_index > 0 and base_port > 0:
+                        baseport_by_ifindex[if_index] = base_port
+
+                if baseport_by_ifindex:
+                    pvid_by_baseport: Dict[int, int] = {}
+                    for oid, val in await self._async_walk(OID_dot1qPvid):
+                        # Instance: ...5.1.1.<basePort>
+                        base_port = int(oid.split(".")[-1])
+                        try:
+                            pvid = int(val)
+                        except Exception:
+                            continue
+                        if pvid > 0:
+                            pvid_by_baseport[base_port] = pvid
+
+                    if pvid_by_baseport:
+                        for if_index, base_port in baseport_by_ifindex.items():
+                            pvid = pvid_by_baseport.get(base_port)
+                            if pvid is not None:
+                                self.cache["ifTable"].setdefault(if_index, {})["vlan_id"] = pvid
+            except Exception:
+                # VLAN discovery is optional; ignore devices that don't implement these MIBs
+                pass
 
             # Display name preference from original repo
             for idx, rec in list(self.cache["ifTable"].items()):
@@ -553,6 +669,117 @@ class SwitchSnmpClient:
 
     # ---------- coordinator hook ----------
     async def async_poll(self) -> Dict[str, Any]:
+        # Keep system/diagnostic fields fresh (e.g., sysUpTime) so diagnostic
+        # sensors update without requiring an integration restart.
+        await self._ensure_engine()
+        await self._ensure_target()
+
+        # Refresh common system fields with minimal overhead.
+        sysdescr, sysname, sysuptime = await asyncio.gather(
+            _do_get_one(self.engine, self.community_data, self.target, self.context, OID_sysDescr),
+            _do_get_one(self.engine, self.community_data, self.target, self.context, OID_sysName),
+            _do_get_one(self.engine, self.community_data, self.target, self.context, OID_sysUpTime),
+        )
+        if sysdescr is not None:
+            self.cache["sysDescr"] = sysdescr
+        if sysname is not None:
+            self.cache["sysName"] = sysname
+        if sysuptime is not None:
+            self.cache["sysUpTime"] = sysuptime
+
+        # Re-evaluate manufacturer/firmware from sysDescr so diagnostic sensors
+        # reflect device changes over time.
+        sd = (self.cache.get("sysDescr") or "").strip()
+        if sd:
+            model_hint = self.cache.get("model")
+
+            manufacturer = None
+            firmware = None
+            parts = [p.strip() for p in sd.split(",")]
+            if len(parts) >= 2:
+                firmware = parts[1] or None
+            head = parts[0]
+            if model_hint and model_hint in head:
+                manufacturer = head.replace(model_hint, "").strip()
+            else:
+                toks = head.split()
+                if len(toks) > 1:
+                    manufacturer = " ".join(toks[:-1])
+
+            # Cisco CBS350: prefer ENTITY-MIB software revision when available.
+            if (model_hint and "CBS" in model_hint) or ("CBS" in sd):
+                try:
+                    sw_rev = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_entPhysicalSoftwareRev_CBS350,
+                    )
+                except Exception:
+                    sw_rev = None
+                if sw_rev:
+                    firmware = sw_rev.strip() or firmware
+
+            # Zyxel: prefer vendor-specific manufacturer/firmware OIDs when detected
+            if "zyxel" in sd.lower():
+                try:
+                    zy_mfg = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_entPhysicalMfgName_Zyxel,
+                    )
+                except Exception:
+                    zy_mfg = None
+                if zy_mfg:
+                    manufacturer = zy_mfg.strip() or manufacturer
+
+                try:
+                    zy_fw = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_zyxel_firmware_version,
+                    )
+                except Exception:
+                    zy_fw = None
+                if zy_fw:
+                    firmware = zy_fw.strip() or firmware
+
+            # MikroTik RouterOS: override using MIKROTIK-MIB when detected
+            if "mikrotik" in sd.lower() or "routeros" in sd.lower():
+                manufacturer = "MikroTik"
+                try:
+                    mk_ver = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_mikrotik_software_version,
+                    )
+                except Exception:
+                    mk_ver = None
+                if mk_ver:
+                    firmware = mk_ver.strip() or firmware
+                try:
+                    mk_model = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_mikrotik_model,
+                    )
+                except Exception:
+                    mk_model = None
+                if mk_model:
+                    self.cache["model"] = mk_model.strip() or self.cache.get("model")
+
+            self.cache["manufacturer"] = manufacturer
+            self.cache["firmware"] = firmware
+
         await self.async_refresh_dynamic()
         return self.cache
 
