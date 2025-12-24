@@ -42,9 +42,6 @@ from .const import (
     OID_mikrotik_model,
     OID_entPhysicalMfgName_Zyxel,
     OID_zyxel_firmware_version,
-    # ✅ FIX: these were referenced below but not imported, so VLAN discovery always failed
-    OID_dot1dBasePortIfIndex,
-    OID_dot1qPvid,
 )
 
 _LOGGER = logging.getLogger(__name__)
