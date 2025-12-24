@@ -10,6 +10,17 @@ CONF_CUSTOM_OIDS = "custom_oids"
 CONF_ENABLE_CUSTOM_OIDS = "enable_custom_oids"
 CONF_RESET_CUSTOM_OIDS = "reset_custom_oids"
 
+# Device Options (per-config-entry overrides)
+CONF_OVERRIDE_COMMUNITY = "override_community"
+CONF_OVERRIDE_PORT = "override_port"
+CONF_OVERRIDE_NAME = "override_name"
+CONF_INCLUDE_STARTS_WITH = "include_starts_with"
+CONF_INCLUDE_CONTAINS = "include_contains"
+CONF_INCLUDE_ENDS_WITH = "include_ends_with"
+CONF_EXCLUDE_STARTS_WITH = "exclude_starts_with"
+CONF_EXCLUDE_CONTAINS = "exclude_contains"
+CONF_EXCLUDE_ENDS_WITH = "exclude_ends_with"
+
 DEFAULT_PORT = 161
 DEFAULT_POLL_INTERVAL = 10  # seconds
 
