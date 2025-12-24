@@ -80,11 +80,34 @@ After installation, restart Home Assistant and add the integration:
 2. Enter the switch hostname/IP address, the SNMP community string, and optionally a friendly name or non-standard SNMP port.
 3. Once the flow completes, Home Assistant adds one `switch` entity per discovered interface. Entities follow the pattern `switch.<hostname>_<interface_name>` (for example: `switch.switch1_gi1_0_1`).
 
-### Custom SNMP OIDs (Advanced)
+### Device Options (Advanced)
 
-Per-device custom SNMP OIDs can be configured from the integration options (⚙️ icon).
+Per-device **Device Options** can be configured from the integration options (⚙️ icon).
 
-This allows overriding how the following diagnostic sensors are detected:
+This allows advanced customization **without deleting and re-adding the device**.
+
+#### Connection & Naming Overrides
+- Override **SNMP community string**
+- Override **SNMP port**
+- Override **friendly device name**
+
+Overrides apply **only to the selected device** and do not affect other switches.
+
+#### Interface Include / Exclude Rules
+Control which interfaces are created as Home Assistant entities using rule-based matching:
+
+- **Include rules**
+  - Starts with / Contains / Ends with
+  - Can explicitly include interfaces that vendor logic would otherwise exclude
+- **Exclude rules**
+  - Prevent entity creation and immediately remove existing matching entities
+  - Exclude rules always take precedence
+
+Rules are evaluated per device and do not require Home Assistant restarts.
+
+#### Custom Diagnostic SNMP OIDs
+Override how diagnostic sensors are detected for devices with non-standard SNMP implementations:
+
 - Manufacturer
 - Model
 - Firmware
@@ -93,9 +116,8 @@ This allows overriding how the following diagnostic sensors are detected:
 
 Notes:
 - Overrides apply **only to the selected device**
-- Leave a field blank to fall back to automatic detection
+- Leave fields blank to fall back to automatic detection
 - A reset option is available to restore defaults
-- Useful for devices with vendor-specific or non-standard SNMP implementations
 
 ---
 
