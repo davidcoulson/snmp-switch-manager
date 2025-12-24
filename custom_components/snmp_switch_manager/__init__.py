@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, PLATFORMS, DEFAULT_POLL_INTERVAL
+from .const import DOMAIN, PLATFORMS, DEFAULT_POLL_INTERVAL, CONF_CUSTOM_OIDS, CONF_OVERRIDE_COMMUNITY, CONF_OVERRIDE_PORT, CONF_OVERRIDE_NAME
 from .snmp import SwitchSnmpClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SwitchManagerConfigEntry
     port = entry.data.get("port")
     community = entry.data.get("community")
 
-    client = SwitchSnmpClient(hass, host, community, port)
+    client = SwitchSnmpClient(hass, host, community, port, custom_oids=entry.options.get(CONF_CUSTOM_OIDS) or {})
     await client.async_initialize()
 
     coordinator = DataUpdateCoordinator(
@@ -44,7 +44,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: SwitchManagerConfigEntry
     await async_register_services(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+async def _async_update_listener(hass: HomeAssistant, entry: SwitchManagerConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: SwitchManagerConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
