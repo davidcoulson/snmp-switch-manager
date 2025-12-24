@@ -84,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.1] - 2025-12-23
 ### Added
+- 🎚️ Support for Mikrotik RouterOS
 - ⚡ Port Speed in the interface attributes
 - 🏷️ VLAN ID in the interface attributes (PVID / untagged VLAN)
 - 🧩 Per-device custom SNMP OID overrides for diagnostic sensors (with reset to defaults)
