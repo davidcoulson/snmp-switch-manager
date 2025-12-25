@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 import voluptuous as vol
+
+import homeassistant.helpers.config_validation as cv
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_PORT, CONF_NAME
+from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
@@ -15,7 +17,6 @@ from .const import (
     CONF_RESET_CUSTOM_OIDS,
     CONF_OVERRIDE_COMMUNITY,
     CONF_OVERRIDE_PORT,
-    CONF_OVERRIDE_NAME,
     CONF_INCLUDE_STARTS_WITH,
     CONF_INCLUDE_CONTAINS,
     CONF_INCLUDE_ENDS_WITH,
@@ -25,6 +26,8 @@ from .const import (
     CONF_PORT_RENAME_USER_RULES,
     CONF_PORT_RENAME_DISABLED_DEFAULT_IDS,
     DEFAULT_PORT_RENAME_RULES,
+    BUILTIN_VENDOR_FILTER_RULES,
+    CONF_DISABLED_VENDOR_FILTER_RULE_IDS
 )
 from .snmp import test_connection, get_sysname
 
@@ -33,7 +36,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_COMMUNITY): str,
         vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
-        vol.Optional(CONF_NAME): str,
     }
 )
 
@@ -60,7 +62,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 # Use sysName for device naming if available
                 sysname = await get_sysname(self.hass, host, community, port)
-                title = user_input.get(CONF_NAME) or sysname or host
+                title = sysname or host
 
                 await self.async_set_unique_id(f"{host}:{port}:{community}")
                 self._abort_if_unique_id_configured()
@@ -121,10 +123,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Work on a mutable copy; persisted via async_update_entry
         self._options: dict = dict(config_entry.options)
 
-    async def _apply_options_and_reload(self) -> None:
-        """Persist options immediately and reload entry without closing the flow."""
+    def _apply_options(self) -> None:
+        """Persist options immediately.
+
+        Note: We intentionally do NOT await an entry reload here.
+        Reloading can take a long time on large switches and causes the UI
+        to report an "Unknown error". The integration already registers an
+        update listener that will reload the entry after options change.
+        """
         self.hass.config_entries.async_update_entry(self._entry, options=self._options)
-        await self.hass.config_entries.async_reload(self._entry.entry_id)
 
     async def async_step_init(self, user_input=None) -> FlowResult:
         """Entry point for the options flow."""
@@ -134,6 +141,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 "device",
                 "include_rules",
                 "exclude_rules",
+                "builtin_filters",
                 "port_name_rules",
                 "custom_oids",
             ],
@@ -151,10 +159,41 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ],
         )
 
+    
+    async def async_step_builtin_filters(self, user_input=None) -> FlowResult:
+        """Enable/disable built-in vendor interface filtering rules."""
+        # Store disabled rule IDs (unchecked == enabled)
+        current_disabled: list[str] = list(self._options.get(CONF_DISABLED_VENDOR_FILTER_RULE_IDS, []) or [])
+        options_map = {r["id"]: r["label"] for r in BUILTIN_VENDOR_FILTER_RULES}
+
+        if user_input is not None:
+            disabled = list(user_input.get(CONF_DISABLED_VENDOR_FILTER_RULE_IDS, []) or [])
+            if disabled:
+                self._options[CONF_DISABLED_VENDOR_FILTER_RULE_IDS] = disabled
+            else:
+                self._options.pop(CONF_DISABLED_VENDOR_FILTER_RULE_IDS, None)
+            self._apply_options()
+            return await self.async_step_init()
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_DISABLED_VENDOR_FILTER_RULE_IDS,
+                    default=current_disabled,
+                ): cv.multi_select(options_map),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="builtin_filters",
+            description_placeholders={},
+            data_schema=schema,
+        )
+
     async def async_step_port_rename_restore_defaults(self, user_input=None) -> FlowResult:
         """Restore built-in default port rename rules (re-enable all)."""
         self._options.pop(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS, None)
-        await self._apply_options_and_reload()
+        self._apply_options()
         return await self.async_step_port_name_rules()
 
     async def async_step_port_rename_defaults(self, user_input=None) -> FlowResult:
@@ -179,7 +218,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             else:
                 self._options.pop(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS, None)
 
-            await self._apply_options_and_reload()
+            self._apply_options()
             return await self.async_step_port_name_rules()
 
         disabled = set(self._options.get(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS) or [])
@@ -246,7 +285,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 rules = list(self._options.get(CONF_PORT_RENAME_USER_RULES) or [])
                 rules.append({"pattern": pattern, "replace": replace, "description": description})
                 self._options[CONF_PORT_RENAME_USER_RULES] = rules
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_port_rename_custom()
 
         schema = vol.Schema(
@@ -283,7 +322,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             else:
                 self._options.pop(CONF_PORT_RENAME_USER_RULES, None)
 
-            await self._apply_options_and_reload()
+            self._apply_options()
             return await self.async_step_port_rename_custom()
 
         opts = {}
@@ -304,7 +343,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     async def async_step_device(self, user_input=None) -> FlowResult:
-        """Per-device connection/name overrides."""
+        """Per-device connection overrides."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -329,15 +368,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 except Exception:
                     errors[CONF_OVERRIDE_PORT] = "invalid_port"
 
-            # Friendly name override
-            name = _opt_str(CONF_OVERRIDE_NAME)
-            if name:
-                self._options[CONF_OVERRIDE_NAME] = name
-            else:
-                self._options.pop(CONF_OVERRIDE_NAME, None)
-
             if not errors:
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_init()
 
         schema = vol.Schema(
@@ -349,10 +381,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_OVERRIDE_PORT,
                     default=str(self._options.get(CONF_OVERRIDE_PORT, "")),
-                ): str,
-                vol.Optional(
-                    CONF_OVERRIDE_NAME,
-                    default=str(self._options.get(CONF_OVERRIDE_NAME, "")),
                 ): str,
             }
         )
@@ -407,7 +435,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     self._options.pop(CONF_EXCLUDE_CONTAINS, None)
                     self._options.pop(CONF_EXCLUDE_ENDS_WITH, None)
 
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_init()
 
             # Add / Remove
@@ -443,7 +471,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 else:
                     self._options.pop(store_key, None)
 
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_init()
 
             # If incomplete input, just re-show the form (no errors)
@@ -495,7 +523,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             if reset or not enable_custom:
                 self._options[CONF_CUSTOM_OIDS] = {}
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_init()
 
             new_custom: dict[str, str] = {}
@@ -511,7 +539,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             if not errors:
                 self._options[CONF_CUSTOM_OIDS] = new_custom
-                await self._apply_options_and_reload()
+                self._apply_options()
                 return await self.async_step_init()
 
         schema_dict = {
