@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, PLATFORMS, DEFAULT_POLL_INTERVAL, CONF_CUSTOM_OIDS, CONF_OVERRIDE_COMMUNITY, CONF_OVERRIDE_PORT, CONF_OVERRIDE_NAME
+from .const import DOMAIN, PLATFORMS, DEFAULT_POLL_INTERVAL, CONF_CUSTOM_OIDS, CONF_OVERRIDE_COMMUNITY, CONF_OVERRIDE_PORT
 from .snmp import SwitchSnmpClient
 
 _LOGGER = logging.getLogger(__name__)
