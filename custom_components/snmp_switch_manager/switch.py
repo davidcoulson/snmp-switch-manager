@@ -1,407 +1,864 @@
 from __future__ import annotations
 
+import asyncio
+import time
 import logging
-import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Iterable, Tuple, List
 
-from homeassistant.components.switch import SwitchEntity
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import HomeAssistant
 
-from .const import (
-    DOMAIN,
-    CONF_PORT_RENAME_USER_RULES,
-    CONF_PORT_RENAME_DISABLED_DEFAULT_IDS,
-    DEFAULT_PORT_RENAME_RULES,
-    CONF_INCLUDE_STARTS_WITH,
-    CONF_INCLUDE_CONTAINS,
-    CONF_INCLUDE_ENDS_WITH,
-    CONF_EXCLUDE_STARTS_WITH,
-    CONF_EXCLUDE_CONTAINS,
-    CONF_EXCLUDE_ENDS_WITH,
-    CONF_DISABLED_VENDOR_FILTER_RULE_IDS,
+from .snmp_compat import (
+    CommunityData,
+    SnmpEngine,
+    UdpTransportTarget,
+    ContextData,
+    ObjectType,
+    ObjectIdentity,
+    get_cmd,
+    next_cmd,
+    set_cmd,
+    OctetString,
+    Integer,
 )
-from .snmp import SwitchSnmpClient
-from .helpers import format_interface_name
+
+# Canonical OIDs from const.py (original repo)
+from .const import (
+    OID_sysDescr,
+    OID_sysName,
+    OID_sysUpTime,
+    OID_ifIndex,
+    OID_ifDescr,
+    OID_ifAdminStatus,
+    OID_ifOperStatus,
+    OID_ifName,
+    OID_ifAlias,
+    OID_ifSpeed,
+    OID_ifHighSpeed,
+    OID_ipAdEntAddr,
+    OID_ipAdEntIfIndex,
+    OID_ipAdEntNetMask,
+    OID_entPhysicalModelName,
+    OID_entPhysicalSoftwareRev_CBS350,
+    OID_mikrotik_software_version,
+    OID_mikrotik_model,
+    OID_entPhysicalMfgName_Zyxel,
+    OID_zyxel_firmware_version,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-
-def _format_bps(bps: Any) -> str:
-    """Format an integer bits-per-second value into a human-friendly string."""
-    try:
-        v = int(bps)
-    except Exception:
-        return "Unknown"
-    if v <= 0:
-        return "Unknown"
-    if v >= 1_000_000_000:
-        g = v / 1_000_000_000
-        return f"{g:g} Gbps"
-    if v >= 1_000_000:
-        m = v / 1_000_000
-        return f"{m:g} Mbps"
-    if v >= 1_000:
-        k = v / 1_000
-        return f"{k:g} Kbps"
-    return f"{v} bps"
-
-ADMIN_STATE = {1: "Up", 2: "Down", 3: "Testing"}
-OPER_STATE = {
-    1: "Up",
-    2: "Down",
-    3: "Testing",
-    4: "Unknown",
-    5: "Dormant",
-    6: "NotPresent",
-    7: "LowerLayerDown",
-}
+# Extra OIDs used in the original repo’s IP logic (not in const.py)
+# (2) ipAddressIfIndex index suffix encodes IPv4 as: 1.4.a.b.c.d
+OID_ipAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
+# (3) OSPF-MIB ip address (suffix carries a.b.c.d.<ifIndex>.<area...>)
+OID_ospfIfIpAddress = "1.3.6.1.2.1.14.8.1.1"
+# (4) IP-FORWARD-MIB route column – instance includes dest + prefixLen (vendor-variant index)
+# we read column 9 (.9) because any column shares the same index layout
+OID_routeCol = "1.3.6.1.2.1.4.24.7.1.9"
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    data = hass.data[DOMAIN][entry.entry_id]
-    client: SwitchSnmpClient = data["client"]
-    coordinator = data["coordinator"]
+# ---------- low-level sync helpers offloaded by compat -------------
 
-    entities: list[IfAdminSwitch] = []
-    desired_if_indexes: set[int] = set()
-    iftable = client.cache.get("ifTable", {})
-    hostname = client.cache.get("sysName") or entry.data.get("name") or client.host
-
-    device_info = DeviceInfo(
-        identifiers={(DOMAIN, f"{client.host}:{client.port}:{client.community}")},
-        name=hostname,
+async def _do_get_one(engine, community, target, context, oid: str) -> Optional[str]:
+    err_ind, err_stat, err_idx, vbs = await get_cmd(
+        engine,
+        community,
+        target,
+        context,
+        ObjectType(ObjectIdentity(oid)),
+        lookupMib=False,  # <<< prevent FS MIB access
     )
-
-    ip_index = client.cache.get("ipIndex", {})
-    ip_mask = client.cache.get("ipMask", {})
-
-    def _build_port_rename_rules() -> list[tuple[str, re.Pattern[str], str]]:
-        """Return ordered (id, compiled_regex, replace) rules for this entry."""
-        rules: list[tuple[str, re.Pattern[str], str]] = []
-
-        disabled = set(entry.options.get(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS) or [])
-
-        # User rules first (highest priority)
-        for i, r in enumerate(entry.options.get(CONF_PORT_RENAME_USER_RULES) or []):
-            try:
-                pattern = str(r.get("pattern") or "").strip()
-                replace = str(r.get("replace") or "")
-                if not pattern:
-                    continue
-                rules.append((f"user_{i}", re.compile(pattern, re.IGNORECASE), replace))
-            except Exception:
-                # Ignore invalid user rules (they should be validated in the UI)
-                continue
-
-        # Built-in defaults next
-        for r in DEFAULT_PORT_RENAME_RULES:
-            rid = r.get("id") or ""
-            if not rid or rid in disabled:
-                continue
-            try:
-                pattern = str(r.get("pattern") or "").strip()
-                replace = str(r.get("replace") or "")
-                if not pattern:
-                    continue
-                rules.append((rid, re.compile(pattern, re.IGNORECASE), replace))
-            except Exception:
-                continue
-
-        return rules
-
-    port_rename_rules = _build_port_rename_rules()
-
-    # Include/Exclude interface rules (simple string match; include wins over exclude)
-    include_starts = [str(s).strip().lower() for s in (entry.options.get(CONF_INCLUDE_STARTS_WITH, []) or []) if str(s).strip()]
-    include_contains = [str(s).strip().lower() for s in (entry.options.get(CONF_INCLUDE_CONTAINS, []) or []) if str(s).strip()]
-    include_ends = [str(s).strip().lower() for s in (entry.options.get(CONF_INCLUDE_ENDS_WITH, []) or []) if str(s).strip()]
-
-    exclude_starts = [str(s).strip().lower() for s in (entry.options.get(CONF_EXCLUDE_STARTS_WITH, []) or []) if str(s).strip()]
-    exclude_contains = [str(s).strip().lower() for s in (entry.options.get(CONF_EXCLUDE_CONTAINS, []) or []) if str(s).strip()]
-    exclude_ends = [str(s).strip().lower() for s in (entry.options.get(CONF_EXCLUDE_ENDS_WITH, []) or []) if str(s).strip()]
-
-    disabled_vendor_filter_ids = set(entry.options.get(CONF_DISABLED_VENDOR_FILTER_RULE_IDS, []) or [])
-
-    def _matches_any(name_l: str, starts: list[str], contains: list[str], ends: list[str]) -> bool:
-        return (
-            any(name_l.startswith(x) for x in starts)
-            or any(x in name_l for x in contains)
-            or any(name_l.endswith(x) for x in ends)
-        )
-
-    def _apply_port_rename(display_name: str) -> str:
-        """Apply the first matching rename rule to the base display name."""
-        if not display_name or not port_rename_rules:
-            return display_name
-        for _rid, rx, rep in port_rename_rules:
-            if rx.search(display_name):
-                try:
-                    return rx.sub(rep, display_name, count=1)
-                except Exception:
-                    return display_name
-        return display_name
-
-    # Vendor detection
-    manufacturer = (client.cache.get("manufacturer") or "").lower()
-    sys_descr = (client.cache.get("sysDescr") or "").lower()
-
-    # Cisco SG family
-    is_cisco_sg = manufacturer.startswith("sg") and sys_descr.startswith("sg")
-
-    # Detect Junos / Juniper EX series
-    manufacturer = (client.cache.get("manufacturer") or "").lower()
-    sys_descr = (client.cache.get("sysDescr") or "").lower()
-    is_junos = "juniper" in manufacturer or "junos" in sys_descr or "ex2200" in sys_descr
-
-    for idx, row in sorted(iftable.items()):
-        raw_name = row.get("name") or row.get("descr") or f"if{idx}"
-        alias = row.get("alias") or ""
-
-        # Skip internal CPU pseudo-interface
-        if raw_name.strip().upper() == "CPU":
-            continue
-
-        lower = (raw_name or "").lower()
-        ip_str = _ip_for_index(idx, ip_index, ip_mask)
-
-        name_l = (raw_name or "").strip().lower()
-        include_hit = _matches_any(name_l, include_starts, include_contains, include_ends)
-        exclude_hit = _matches_any(name_l, exclude_starts, exclude_contains, exclude_ends)
-
-        # Exclude rules always win.
-        if exclude_hit:
-            continue
-
-        is_port_channel = (
-            lower.startswith("po")
-            or lower.startswith("port-channel")
-            or lower.startswith("link aggregate")
-        )
-        if is_port_channel and not (ip_str or alias):
-            # Only create PortChannel entity if configured (alias or IP present)
-            continue
-
-        # Get interface details
-        name = raw_name.strip()
-        lower_name = name.lower()
-        admin = row.get("admin")
-        oper = row.get("oper")
-        has_ip = bool(ip_str)
-        include = False
-        
-
-        # Cisco SG interface selection rules (can disable individual built-in rules)
-        if is_cisco_sg:
-            enable_physical = "cisco_sg_physical_fa_gi" not in disabled_vendor_filter_ids
-            enable_vlan = "cisco_sg_vlan_admin_or_oper" not in disabled_vendor_filter_ids
-            enable_has_ip = "cisco_sg_other_has_ip" not in disabled_vendor_filter_ids
-
-            if enable_physical or enable_vlan or enable_has_ip:
-                name = raw_name.strip()
-                lower_name = name.lower()
-                admin = row.get("admin")
-                oper = row.get("oper")
-                has_ip = bool(ip_str)
-                include = False
-
-                if enable_physical and (lower_name.startswith("fa") or lower_name.startswith("gi")):
-                    include = True
-
-                elif enable_vlan and lower_name.startswith("vlan"):
-                    if oper == 1 or admin == 2:
-                        include = True
-
-                elif enable_has_ip and has_ip:
-                    include = True
-
-                if not include and not include_hit:
-                    continue
-
-
-
-        # Junos (e.g. EX2200) interface selection rules (can disable individual built-in rules)
-        if is_junos:
-            enable_physical = "junos_physical_ge" not in disabled_vendor_filter_ids
-            enable_l3_subif = "junos_l3_subif_has_ip" not in disabled_vendor_filter_ids
-            enable_vlan = "junos_vlan_admin_or_oper" not in disabled_vendor_filter_ids
-            enable_has_ip = "junos_other_has_ip" not in disabled_vendor_filter_ids
-
-            if enable_physical or enable_l3_subif or enable_vlan or enable_has_ip:
-                name = raw_name.strip()
-                lower_name = name.lower()
-                admin = row.get("admin")
-                oper = row.get("oper")
-                has_ip = bool(ip_str)
-                include = False
-
-                # 1) Physical front-panel ports: ge-0/0/X (no subinterface suffix)
-                if enable_physical and lower_name.startswith("ge-") and "." not in name:
-                    include = True
-
-                # 2) L3 subinterfaces: ge-0/0/X.Y – only keep non-.0 with an IP address
-                elif enable_l3_subif and lower_name.startswith("ge-") and "." in name:
-                    base, sub = name.split(".", 1)
-                    if sub != "0" and has_ip:
-                        include = True
-
-                # 3) VLAN interfaces that are operationally up or administratively disabled
-                elif enable_vlan and lower_name.startswith("vlan"):
-                    if oper == 1 or admin == 2:
-                        include = True
-
-                # 4) Any other non-physical interface with an IP address configured
-                elif enable_has_ip and has_ip:
-                    include = True
-
-                if not include and not include_hit:
-                    continue
-
-
-                # Apply per-device port rename rules to the *raw* interface name first.
-        # This allows rules to match vendor-specific raw strings (e.g. "Unit: ...") before any normalization.
-        # _apply_port_rename() closes over port_rename_rules
-        raw_for_display = _apply_port_rename((raw_name or "").strip())
-
-# Try to parse Gi1/0/1 style to preserve unit/slot/port in display name
-        unit = 1
-        slot = 0
-        port = None
-        try:
-            # e.g., "Gi1/0/1" -> parts after the first two letters
-            if "/" in raw_for_display and raw_for_display[2:3].isdigit():
-                parts = raw_for_display[2:].split("/")
-                if len(parts) >= 3:
-                    unit = int(parts[0])
-                    slot = int(parts[1])
-                    port = int(parts[2])
-        except Exception:
-            pass
-
-        display = format_interface_name(raw_for_display, unit=unit, slot=slot, port=port)
-        display = _apply_port_rename(display)
-
-        entities.append(
-            IfAdminSwitch(
-                coordinator=coordinator,
-                entry_id=entry.entry_id,
-                if_index=idx,
-                raw_name=raw_name,
-                display_name=display,
-                alias=alias,
-                hostname=hostname,
-                device_info=device_info,
-                client=client,
-            )
-        )
-
-        desired_if_indexes.add(idx)
-
-    # Remove any previously-created switch entities that are no longer desired
-    # (e.g. excluded by user rules). Without this, Home Assistant keeps the old
-    # entities around even if we stop creating them.
-    ent_reg = er.async_get(hass)
-    for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        if ent.domain != "switch":
-            continue
-        if not (ent.unique_id or "").startswith(f"{entry.entry_id}-if-"):
-            continue
-        try:
-            old_idx = int((ent.unique_id or "").split("-if-", 1)[1])
-        except Exception:
-            continue
-        if old_idx not in desired_if_indexes:
-            ent_reg.async_remove(ent.entity_id)
-
-    async_add_entities(entities)
-
-def _ip_for_index(if_index: int, ip_index: Dict[str, int], ip_mask: Dict[str, str]) -> Optional[str]:
-    """Return IP/maskbits string for an ifIndex if present."""
-    for ip, idx in ip_index.items():
-        if idx == if_index:
-            mask = ip_mask.get(ip)
-            if not mask:
-                return ip
-            try:
-                import ipaddress
-
-                net = ipaddress.IPv4Network((ip, mask), strict=False)
-                return f"{ip}/{net.prefixlen}"
-            except Exception:
-                return ip
+    if err_ind or err_stat:
+        return None
+    for vb in vbs:
+        return str(vb[1])
     return None
 
 
-class IfAdminSwitch(CoordinatorEntity, SwitchEntity):
-    def __init__(
-        self,
-        coordinator,
-        entry_id: str,
-        if_index: int,
-        raw_name: str,
-        display_name: str,
-        alias: str,
-        hostname: str,
-        device_info: DeviceInfo,
-        client: SwitchSnmpClient,
-    ):
-        super().__init__(coordinator)
-        self._entry_id = entry_id
-        self._if_index = if_index
-        self._raw_name = raw_name
-        self._display = display_name
-        self._alias = alias
-        self._hostname = hostname
-        self._client = client
+async def _do_next_walk(
+    engine, community, target, context, base_oid: str
+) -> Iterable[Tuple[str, Any]]:
+    current_oid = base_oid
+    seen: set[str] = set()
+    while True:
+        err_ind, err_stat, err_idx, vbs = await next_cmd(
+            engine,
+            community,
+            target,
+            context,
+            ObjectType(ObjectIdentity(current_oid)),
+            lexicographicMode=False,
+            lookupMib=False,  # <<< prevent FS MIB access
+        )
+        if err_ind or err_stat or not vbs:
+            break
 
-        self._attr_unique_id = f"{entry_id}-if-{if_index}"
-        # Name includes hostname so entity_id becomes e.g. switch.switch1_gi1_0_1
-        self._attr_name = f"{hostname} {display_name}"
-        self._attr_device_info = device_info
+        advanced = False
+        for vb in vbs:
+            oid_obj, val = vb
+            oid_str = str(oid_obj)
+            if not (oid_str == base_oid or oid_str.startswith(base_oid + ".")):
+                return
+            if oid_str in seen:
+                return
+            seen.add(oid_str)
+            yield oid_str, val
+            current_oid = oid_str
+            advanced = True
 
-    @property
-    def is_on(self) -> bool:
-        row = self.coordinator.data.get("ifTable", {}).get(self._if_index, {})
-        return row.get("admin") == 1
+        if not advanced:
+            break
 
-    async def async_turn_on(self, **kwargs):
-        ok = await self._client.set_admin_status(self._if_index, 1)
-        if ok:
-            self.coordinator.data["ifTable"].setdefault(self._if_index, {})["admin"] = 1
-            self.async_write_ha_state()
 
-    async def async_turn_off(self, **kwargs):
-        ok = await self._client.set_admin_status(self._if_index, 2)
-        if ok:
-            self.coordinator.data["ifTable"].setdefault(self._if_index, {})["admin"] = 2
-            self.async_write_ha_state()
+async def _do_set_alias(
+    engine, community, target, context, if_index: int, alias: str
+) -> bool:
+    err_ind, err_stat, err_idx, _ = await set_cmd(
+        engine,
+        community,
+        target,
+        context,
+        ObjectType(ObjectIdentity(f"{OID_ifAlias}.{if_index}"), OctetString(alias)),
+        lookupMib=False,  # <<< prevent FS MIB access
+    )
+    return (not err_ind) and (not err_stat)
 
-    @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
-        row = self.coordinator.data.get("ifTable", {}).get(self._if_index, {})
-        attrs: Dict[str, Any] = {
-            "Index": self._if_index,
-            "Name": self._display,
-            "Alias": row.get("alias") or "",
-            "Admin": ADMIN_STATE.get(row.get("admin", 0), "Unknown"),
-            "Oper": OPER_STATE.get(row.get("oper", 0), "Unknown"),
-            "Speed": _format_bps(row.get("speed_bps")),
+
+async def _do_set_admin_status(
+    engine, community, target, context, if_index: int, value: int
+) -> bool:
+    err_ind, err_stat, err_idx, _ = await set_cmd(
+        engine,
+        community,
+        target,
+        context,
+        ObjectType(
+            ObjectIdentity(f"{OID_ifAdminStatus}.{if_index}"),
+            Integer(value),
+        ),
+        lookupMib=False,  # <<< prevent FS MIB access
+    )
+    return (not err_ind) and (not err_stat)
+
+
+# ---------- client ----------
+
+class SwitchSnmpClient:
+    """SNMP client using PySNMP v7 asyncio API."""
+
+    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int, custom_oids: Optional[Dict[str, str]] = None) -> None:
+        self.hass = hass
+        self.host = host
+        self.community = community
+        self.port = port
+        self.custom_oids: Dict[str, str] = dict(custom_oids or {})
+
+        self.engine = None
+        self.target = None
+        self._target_args = ((host, port),)
+        self._target_kwargs = dict(timeout=1.5, retries=1)
+
+        self.community_data = CommunityData(community, mpModel=1)  # v2c
+        self.context = ContextData()
+
+        self.cache: Dict[str, Any] = {
+            "sysDescr": None,
+            "sysName": None,
+            "sysUpTime": None,
+            "ifTable": {},
+            "ipIndex": {},
+            "ipMask": {},
+            "manufacturer": None,
+            "model": None,
+            "firmware": None,
         }
 
-        vlan_id = row.get("vlan_id")
-        if vlan_id is not None:
+        # sysUpTime updates continuously; to avoid excessive churn in Home
+        # Assistant, we throttle polling separately from the main coordinator.
+        # These are used by async_poll().
+        self._last_uptime_poll: float = 0.0
+        self._uptime_poll_interval: float = 300.0
+
+    def _custom_oid(self, key: str) -> Optional[str]:
+        val = (self.custom_oids or {}).get(key)
+        if not val:
+            return None
+        v = str(val).strip()
+        if not v:
+            return None
+        if v.startswith("."):
+            v = v[1:]
+        return v
+
+    async def _ensure_engine(self) -> None:
+        if self.engine is not None:
+            return
+
+        def _build_engine_with_minimal_preload():
+            eng = SnmpEngine()
             try:
-                vlan_int = int(vlan_id)
+                mib_builder = eng.getMibBuilder()
+                try:
+                    mib_builder.setMibSources()  # clear FS sources
+                except TypeError:
+                    pass
+                try:
+                    mib_builder.loadModules("SNMPv2-SMI", "SNMPv2-MIB", "__SNMPv2-MIB", "PYSNMP-SOURCE-MIB")
+                except Exception:
+                    pass
             except Exception:
-                vlan_int = None
-            if vlan_int:
-                attrs["VLAN ID"] = vlan_int
-        ip = _ip_for_index(
-            self._if_index,
-            self.coordinator.data.get("ipIndex", {}),
-            self.coordinator.data.get("ipMask", {}),
+                pass
+            return eng
+
+        self.engine = await self.hass.async_add_executor_job(_build_engine_with_minimal_preload)
+
+    async def _ensure_target(self) -> None:
+        if self.target is None:
+            self.target = await UdpTransportTarget.create(*self._target_args, **self._target_kwargs)
+
+    # ---------- lifecycle / fetch ----------
+
+    async def async_initialize(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+
+        # Build interface table and state first (names, alias, admin/oper)
+        await self._async_walk_interfaces(dynamic_only=False)
+
+        # Build IPv4 maps and attach to interfaces (original repo logic)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+        # System fields
+        self.cache["sysDescr"] = await self._async_get_one(OID_sysDescr)
+        self.cache["sysName"] = await self._async_get_one(self._custom_oid("hostname") or OID_sysName)
+        self.cache["sysUpTime"] = await self._async_get_one(self._custom_oid("uptime") or OID_sysUpTime)
+
+        # Model hint (optional)
+        ent_models = await self._async_walk(OID_entPhysicalModelName)
+        model_hint = None
+        for _oid, val in ent_models:
+            s = str(val).strip()
+            if s:
+                model_hint = s
+                break
+        self.cache["model"] = model_hint
+
+        # Manufacturer / firmware parsing from sysDescr (unchanged behavior)
+        sd = (self.cache.get("sysDescr") or "").strip()
+        manufacturer = None
+        firmware = None
+        if sd:
+            parts = [p.strip() for p in sd.split(",")]
+            if len(parts) >= 2:
+                firmware = parts[1] or None
+            head = parts[0]
+            if model_hint and model_hint in head:
+                manufacturer = head.replace(model_hint, "").strip()
+            else:
+                toks = head.split()
+                if len(toks) > 1:
+                    manufacturer = " ".join(toks[:-1])
+
+        # Cisco CBS350: prefer ENTITY-MIB software revision when available.
+        # This uses the documented entPhysicalSoftwareRev OID for the base chassis.
+        if (model_hint and "CBS" in model_hint) or ("CBS" in sd):
+            try:
+                sw_rev = await self._async_get_one(OID_entPhysicalSoftwareRev_CBS350)
+            except Exception:
+                sw_rev = None
+            if sw_rev:
+                firmware = sw_rev.strip() or firmware
+
+        # Zyxel: prefer vendor-specific manufacturer/firmware OIDs when detected
+        if "zyxel" in sd.lower():
+            try:
+                zy_mfg = await self._async_get_one(OID_entPhysicalMfgName_Zyxel)
+            except Exception:
+                zy_mfg = None
+            if zy_mfg:
+                manufacturer = zy_mfg.strip() or manufacturer
+
+            try:
+                zy_fw = await self._async_get_one(OID_zyxel_firmware_version)
+            except Exception:
+                zy_fw = None
+            if zy_fw:
+                firmware = zy_fw.strip() or firmware
+
+        # MikroTik RouterOS: override using MIKROTIK-MIB when detected
+        if "mikrotik" in sd.lower() or "routeros" in sd.lower():
+            # Manufacturer should be a clean vendor name, not "RouterOS".
+            manufacturer = "MikroTik"
+
+            # Firmware version from routerBoardInfoSoftwareVersion (e.g. "7.20.6")
+            try:
+                mk_ver = await self._async_get_one(OID_mikrotik_software_version)
+            except Exception:
+                mk_ver = None
+            if mk_ver:
+                firmware = mk_ver.strip() or firmware
+
+            # Model name from routerBoardInfoModel (e.g. "CRS305-1G-4S+")
+            try:
+                mk_model = await self._async_get_one(OID_mikrotik_model)
+            except Exception:
+                mk_model = None
+            if mk_model:
+                self.cache["model"] = mk_model.strip() or self.cache.get("model")
+
+        # Custom OIDs: per-device overrides take precedence over vendor logic and generic parsing
+        try:
+            mfg_oid = self._custom_oid("manufacturer")
+            if mfg_oid:
+                mfg_val = await self._async_get_one(mfg_oid)
+                if mfg_val:
+                    manufacturer = mfg_val.strip() or manufacturer
+        except Exception:
+            pass
+
+        try:
+            fw_oid = self._custom_oid("firmware")
+            if fw_oid:
+                fw_val = await self._async_get_one(fw_oid)
+                if fw_val:
+                    firmware = fw_val.strip() or firmware
+        except Exception:
+            pass
+
+        try:
+            model_oid = self._custom_oid("model")
+            if model_oid:
+                model_val = await self._async_get_one(model_oid)
+                if model_val:
+                    self.cache["model"] = model_val.strip() or self.cache.get("model")
+        except Exception:
+            pass
+
+        self.cache["manufacturer"] = manufacturer
+        self.cache["firmware"] = firmware
+
+    async def _async_get_one(self, oid: str) -> Optional[str]:
+        await self._ensure_engine()
+        await self._ensure_target()
+        return await _do_get_one(self.engine, self.community_data, self.target, self.context, oid)
+
+    async def _async_walk(self, base_oid: str) -> list[tuple[str, Any]]:
+        await self._ensure_engine()
+        await self._ensure_target()
+        out: list[tuple[str, Any]] = []
+        async for oid_str, val in _do_next_walk(self.engine, self.community_data, self.target, self.context, base_oid):
+            out.append((oid_str, val))
+        return out
+
+    async def _async_walk_interfaces(self, dynamic_only: bool = False) -> None:
+        if not dynamic_only:
+            self.cache["ifTable"] = {}
+
+            # Indexes
+            for oid, val in await self._async_walk(OID_ifIndex):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"][idx] = {"index": idx}
+
+            # Descriptions
+            for oid, val in await self._async_walk(OID_ifDescr):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["descr"] = str(val)
+
+            # Names
+            for oid, val in await self._async_walk(OID_ifName):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["name"] = str(val)
+
+            # Aliases
+            for oid, val in await self._async_walk(OID_ifAlias):
+                idx = int(oid.split(".")[-1])
+                self.cache["ifTable"].setdefault(idx, {})["alias"] = str(val)
+
+            # Speeds (prefer ifHighSpeed where present; fall back to ifSpeed)
+            for oid, val in await self._async_walk(OID_ifSpeed):
+                idx = int(oid.split(".")[-1])
+                try:
+                    bps = int(val)
+                except Exception:
+                    continue
+                if bps > 0:
+                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = bps
+
+            for oid, val in await self._async_walk(OID_ifHighSpeed):
+                idx = int(oid.split(".")[-1])
+                try:
+                    mbps = int(val)
+                except Exception:
+                    continue
+                # ifHighSpeed is Mbps; prefer it when non-zero
+                if mbps > 0:
+                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = mbps * 1_000_000
+
+            # VLAN (PVID) mapping via BRIDGE-MIB / Q-BRIDGE-MIB
+            # Map ifIndex -> dot1dBasePort -> dot1qPvid (untagged VLAN)
+            try:
+                baseport_by_ifindex: Dict[int, int] = {}
+                for oid, val in await self._async_walk(OID_dot1dBasePortIfIndex):
+                    # Instance: ...1.4.1.2.<basePort>
+                    base_port = int(oid.split(".")[-1])
+                    if_index = int(val)
+                    if if_index > 0 and base_port > 0:
+                        baseport_by_ifindex[if_index] = base_port
+
+                if baseport_by_ifindex:
+                    pvid_by_baseport: Dict[int, int] = {}
+                    for oid, val in await self._async_walk(OID_dot1qPvid):
+                        # Instance: ...5.1.1.<basePort>
+                        base_port = int(oid.split(".")[-1])
+                        try:
+                            pvid = int(val)
+                        except Exception:
+                            continue
+                        if pvid > 0:
+                            pvid_by_baseport[base_port] = pvid
+
+                    if pvid_by_baseport:
+                        for if_index, base_port in baseport_by_ifindex.items():
+                            pvid = pvid_by_baseport.get(base_port)
+                            if pvid is not None:
+                                self.cache["ifTable"].setdefault(if_index, {})["vlan_id"] = pvid
+            except Exception:
+                # VLAN discovery is optional; ignore devices that don't implement these MIBs
+                pass
+
+            # Display name preference from original repo
+            for idx, rec in list(self.cache["ifTable"].items()):
+                nm = (rec.get("name") or "").strip()
+                ds = (rec.get("descr") or "").strip()
+                rec["display_name"] = nm or ds or f"ifIndex {idx}"
+
+        # Dynamic state only
+        for oid, val in await self._async_walk(OID_ifAdminStatus):
+            idx = int(oid.split(".")[-1])
+            self.cache["ifTable"].setdefault(idx, {})["admin"] = int(val)
+
+        for oid, val in await self._async_walk(OID_ifOperStatus):
+            idx = int(oid.split(".")[-1])
+            self.cache["ifTable"].setdefault(idx, {})["oper"] = int(val)
+
+    async def _async_walk_ipv4(self) -> None:
+        """
+        ORIGINAL REPO LOGIC, adapted to asyncio:
+        1) Legacy IP-MIB ipAdEnt* for IPv4 list + masks when present.
+        2) IP-MIB ipAddressIfIndex: parse IPv4 from instance suffix (1.4.a.b.c.d).
+        3) OSPF-MIB ospfIfIpAddress: also yields a.b.c.d with suffix carrying ifIndex.
+        4) Derive mask bits by parsing IP-FORWARD-MIB route instances (.7.1.9) and
+           choosing the most specific network that contains each discovered IP.
+        """
+        ip_index: Dict[str, int] = {}
+        ip_mask: Dict[str, str] = {}  # primarily from (1) and (4)
+
+        def _normalize_ipv4(val: Any) -> str:
+            """Convert SNMP IPv4 values to dotted-quad strings.
+        
+            Some vendors (e.g., Cisco CBS series, Arista) return ipAdEntAddr/ipAdEntNetMask
+            as raw octets instead of a printable IpAddress. This helper keeps existing
+            behavior for vendors that already return dotted strings."""
+            s = str(val)
+            parts = s.split(".")
+            if len(parts) == 4 and all(p.isdigit() for p in parts):
+                # Already a normal dotted-decimal IPv4 string
+                return s
+        
+            # Try to interpret as 4 raw octets
+            b: Optional[bytes] = None
+        
+            # Fast path for native bytes/bytearray
+            if isinstance(val, (bytes, bytearray)):
+                b = bytes(val)
+            else:
+                try:
+                    # pysnmp types often support __bytes__
+                    b = bytes(val)  # type: ignore[arg-type]
+                except Exception:
+                    # On some vendors (e.g. Arista) IpAddress may come back
+                    # as a 4-character Python str like "C;U[" – treat each
+                    # character as a raw octet.
+                    if isinstance(val, str):
+                        try:
+                            b = val.encode("latin-1")
+                        except Exception:
+                            b = None
+                    if b is None:
+                        try:
+                            b = val.asOctets()  # type: ignore[attr-defined]
+                        except Exception:
+                            b = None
+        
+            if b and len(b) == 4:
+                return ".".join(str(x) for x in b)
+        
+            # Fallback: give the original string representation
+            return s
+
+        # ---- (1) Legacy table: ipAdEnt* ----
+        legacy_addrs = await self._async_walk(OID_ipAdEntAddr)
+        if legacy_addrs:
+            for _oid, val in legacy_addrs:
+                ip_index[_normalize_ipv4(val)] = None  # type: ignore[assignment]
+
+            for oid, val in await self._async_walk(OID_ipAdEntIfIndex):
+                parts = oid.split(".")[-4:]
+                ip = ".".join(parts)
+                try:
+                    ip_index[ip] = int(val)
+                except Exception:
+                    continue
+
+            for oid, val in await self._async_walk(OID_ipAdEntNetMask):
+                parts = oid.split(".")[-4:]
+                ip = ".".join(parts)
+                ip_mask[ip] = _normalize_ipv4(val)
+
+        # ---- (2) IP-MIB ipAddressIfIndex: parse instance suffix (1.4.a.b.c.d)
+        try:
+            for oid, val in await self._async_walk(OID_ipAddressIfIndex):
+                suffix = oid[len(OID_ipAddressIfIndex) + 1 :]
+                parts = [int(x) for x in suffix.split(".") if x]
+                for i in range(len(parts) - 6 + 1):
+                    if parts[i] == 1 and parts[i + 1] == 4:
+                        a, b, c, d = parts[i + 2 : i + 6]
+                        ip = f"{a}.{b}.{c}.{d}"
+                        try:
+                            idx = int(val)
+                            ip_index.setdefault(ip, idx)
+                        except Exception:
+                            pass
+                        break
+        except Exception:
+            pass  # IP-MIB may be absent
+
+        # ---- (3) OSPF-MIB ospfIfIpAddress: suffix a.b.c.d.<ifIndex>.<area...>
+        try:
+            for oid, val in await self._async_walk(OID_ospfIfIpAddress):
+                try:
+                    suffix = oid[len(OID_ospfIfIpAddress) + 1 :]
+                    parts = [int(x) for x in suffix.split(".")]
+                    if len(parts) >= 5:
+                        a, b, c, d = parts[0], parts[1], parts[2], parts[3]
+                        if_index = parts[4]
+                        ip = f"{a}.{b}.{c}.{d}"
+                        ip_index.setdefault(ip, int(if_index))
+                except Exception:
+                    continue
+        except Exception:
+            pass  # OSPF-MIB may be absent
+
+        # ---- (4) Derive mask bits from IP-FORWARD-MIB route instances (.7.1.9)
+        route_prefixes: List[Tuple[int, int]] = []
+
+        def _bits_to_mask(bits: int) -> str:
+            if bits <= 0:
+                return "0.0.0.0"
+            if bits >= 32:
+                return "255.255.255.255"
+            mask = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
+            return ".".join(str((mask >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+        def _ip_to_int(ip: str) -> int:
+            a, b, c, d = (int(x) for x in ip.split("."))
+            return (a << 24) | (b << 16) | (c << 8) | d
+
+        try:
+            for oid, _val in await self._async_walk(OID_routeCol):
+                try:
+                    suffix = oid[len(OID_routeCol) + 1 :]
+                    parts = [int(x) for x in suffix.split(".") if x]
+
+                    for i in range(len(parts) - 7):
+                        if parts[i] == 1 and parts[i + 1] == 4:
+                            a, b, c, d = parts[i + 2 : i + 6]
+                            bits = parts[i + 6] if i + 6 < len(parts) else None
+                            if bits is None or bits < 0 or bits > 32:
+                                continue
+                            net_int = _ip_to_int(f"{a}.{b}.{c}.{d}")
+                            route_prefixes.append((net_int, bits))
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass  # table may be absent on some vendors
+
+        if route_prefixes and ip_index:
+            route_prefixes.sort(key=lambda t: t[1], reverse=True)
+            for ip in list(ip_index.keys()):
+                ip_int = _ip_to_int(ip)
+                for net_int, bits in route_prefixes:
+                    mask_int = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF if bits else 0
+                    if bits == 0 or (ip_int & mask_int) == (net_int & mask_int):
+                        ip_mask[ip] = _bits_to_mask(bits)
+                        break
+
+        # Commit maps to cache
+        if ip_index:
+            self.cache["ipIndex"] = ip_index
+        if ip_mask:
+            self.cache["ipMask"] = ip_mask
+
+    def _attach_ipv4_to_interfaces(self) -> None:
+        if_table: Dict[int, Dict[str, Any]] = self.cache.get("ifTable", {})
+        ip_idx: Dict[str, Optional[int]] = self.cache.get("ipIndex", {})
+        ip_mask: Dict[str, str] = self.cache.get("ipMask", {})
+
+        # Clear prior fields to avoid stale data
+        for rec in if_table.values():
+            for k in (
+                "ipv4", "ip", "netmask", "cidr",
+                "ip_address", "ipv4_address", "ipv4_netmask", "ipv4_cidr",
+                "ip_cidr_str",
+            ):
+                rec.pop(k, None)
+
+        def _mask_to_prefix(mask: str | None) -> Optional[int]:
+            if not mask:
+                return None
+            try:
+                parts = [int(p) for p in mask.split(".")]
+                if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+                    return None
+                bits = "".join(f"{p:08b}" for p in parts)
+                if "01" in bits:
+                    return None
+                return bits.count("1")
+            except Exception:
+                return None
+
+        # Attach; if mask present convert to prefix bits for /cidr string
+        for ip, idx in ip_idx.items():
+            if not idx:
+                continue
+            rec = if_table.get(idx)
+            if not rec:
+                continue
+            mask = ip_mask.get(ip)
+            prefix = _mask_to_prefix(mask)
+            rec.setdefault("ipv4", []).append({"ip": ip, "netmask": mask, "cidr": prefix})
+
+        # Convenience single-address fields for UI (unchanged behavior)
+        for rec in if_table.values():
+            addrs = rec.get("ipv4") or []
+            if len(addrs) == 1:
+                ip = addrs[0]["ip"]
+                mask = addrs[0]["netmask"]
+                prefix = addrs[0]["cidr"]
+                rec["ip"] = ip
+                rec["netmask"] = mask
+                rec["cidr"] = prefix
+                rec["ip_address"] = ip
+                rec["ipv4_address"] = ip
+                rec["ipv4_netmask"] = mask
+                rec["ipv4_cidr"] = prefix
+                if prefix is not None:
+                    rec["ip_cidr_str"] = f"{ip}/{prefix}"
+
+    async def async_refresh_all(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+        await self._async_walk_interfaces(dynamic_only=False)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+    async def async_refresh_dynamic(self) -> None:
+        await self._ensure_engine()
+        await self._ensure_target()
+        await self._async_walk_interfaces(dynamic_only=True)
+        await self._async_walk_ipv4()
+        self._attach_ipv4_to_interfaces()
+
+    # ---------- coordinator hook ----------
+    async def async_poll(self) -> Dict[str, Any]:
+        # Keep system/diagnostic fields fresh (e.g., sysUpTime) so diagnostic
+        # sensors update without requiring an integration restart.
+        await self._ensure_engine()
+        await self._ensure_target()
+
+        # Refresh common system fields with minimal overhead.
+                # Refresh common system fields with minimal overhead.
+        # sysUpTime can be very "chatty" (updates constantly), so poll it less frequently.
+        now_mono = time.monotonic()
+        poll_uptime = (
+            "sysUpTime" not in self.cache
+            or (now_mono - self._last_uptime_poll) >= float(self._uptime_poll_interval)
         )
-        if ip:
-            attrs["IP"] = ip
-        return attrs
+
+        if poll_uptime:
+            self._last_uptime_poll = now_mono
+
+        sysname_oid = self._custom_oid("hostname") or OID_sysName
+        uptime_oid = self._custom_oid("uptime") or OID_sysUpTime
+
+        sysdescr, sysname, sysuptime = await asyncio.gather(
+            _do_get_one(self.engine, self.community_data, self.target, self.context, OID_sysDescr),
+            _do_get_one(self.engine, self.community_data, self.target, self.context, sysname_oid),
+            _do_get_one(self.engine, self.community_data, self.target, self.context, uptime_oid) if poll_uptime else asyncio.sleep(0, result=None),
+        )
+        if (not poll_uptime) and ("sysUpTime" in self.cache):
+            sysuptime = self.cache.get("sysUpTime")
+        if sysdescr is not None:
+            self.cache["sysDescr"] = sysdescr
+        if sysname is not None:
+            self.cache["sysName"] = sysname
+        if sysuptime is not None:
+            self.cache["sysUpTime"] = sysuptime
+
+        # Re-evaluate manufacturer/firmware from sysDescr so diagnostic sensors
+        # reflect device changes over time.
+        sd = (self.cache.get("sysDescr") or "").strip()
+        if sd:
+            model_hint = self.cache.get("model")
+
+            manufacturer = None
+            firmware = None
+            parts = [p.strip() for p in sd.split(",")]
+            if len(parts) >= 2:
+                firmware = parts[1] or None
+            head = parts[0]
+            if model_hint and model_hint in head:
+                manufacturer = head.replace(model_hint, "").strip()
+            else:
+                toks = head.split()
+                if len(toks) > 1:
+                    manufacturer = " ".join(toks[:-1])
+
+            # Cisco CBS350: prefer ENTITY-MIB software revision when available.
+            if (model_hint and "CBS" in model_hint) or ("CBS" in sd):
+                try:
+                    sw_rev = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_entPhysicalSoftwareRev_CBS350,
+                    )
+                except Exception:
+                    sw_rev = None
+                if sw_rev:
+                    firmware = sw_rev.strip() or firmware
+
+            # Zyxel: prefer vendor-specific manufacturer/firmware OIDs when detected
+            if "zyxel" in sd.lower():
+                try:
+                    zy_mfg = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_entPhysicalMfgName_Zyxel,
+                    )
+                except Exception:
+                    zy_mfg = None
+                if zy_mfg:
+                    manufacturer = zy_mfg.strip() or manufacturer
+
+                try:
+                    zy_fw = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_zyxel_firmware_version,
+                    )
+                except Exception:
+                    zy_fw = None
+                if zy_fw:
+                    firmware = zy_fw.strip() or firmware
+
+            # MikroTik RouterOS: override using MIKROTIK-MIB when detected
+            if "mikrotik" in sd.lower() or "routeros" in sd.lower():
+                manufacturer = "MikroTik"
+                try:
+                    mk_ver = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_mikrotik_software_version,
+                    )
+                except Exception:
+                    mk_ver = None
+                if mk_ver:
+                    firmware = mk_ver.strip() or firmware
+                try:
+                    mk_model = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        OID_mikrotik_model,
+                    )
+                except Exception:
+                    mk_model = None
+                if mk_model:
+                    self.cache["model"] = mk_model.strip() or self.cache.get("model")
+
+            # Custom OIDs: per-device overrides take precedence over vendor logic and generic parsing
+            try:
+                mfg_oid = self._custom_oid("manufacturer")
+                if mfg_oid:
+                    mfg_val = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        mfg_oid,
+                    )
+                    if mfg_val:
+                        manufacturer = mfg_val.strip() or manufacturer
+            except Exception:
+                pass
+
+            try:
+                fw_oid = self._custom_oid("firmware")
+                if fw_oid:
+                    fw_val = await _do_get_one(
+                        self.engine,
+                        self.community_data,
+                        self.target,
+                        self.context,
+                        fw_oid,
+                    )
+                    if fw_val:
+                        firmware = fw_val.strip() or firmware
+            except Exception:
+                pass
+
+            self.cache["manufacturer"] = manufacturer
+            self.cache["firmware"] = firmware
+
+        await self.async_refresh_dynamic()
+        return self.cache
+
+    # ---------- mutations ----------
+    async def set_alias(self, if_index: int, alias: str) -> bool:
+        await self._ensure_engine()
+        await self._ensure_target()
+        ok = await _do_set_alias(self.engine, self.community_data, self.target, self.context, if_index, alias)
+        if ok:
+            self.cache.setdefault("ifTable", {}).setdefault(if_index, {})["alias"] = alias
+        else:
+            _LOGGER.warning("Failed to set alias via SNMP on ifIndex %s", if_index)
+        return ok
+
+    async def set_admin_status(self, if_index: int, value: int) -> bool:
+        await self._ensure_engine()
+        await self._ensure_target()
+        return await _do_set_admin_status(self.engine, self.community_data, self.target, self.context, if_index, value)
+
+
+# ---------- helpers for config_flow ----------
+
+async def test_connection(hass: HomeAssistant, host: str, community: str, port: int) -> bool:
+    client = SwitchSnmpClient(hass, host, community, port)
+    sysname = await client._async_get_one(OID_sysName)
+    return sysname is not None
+
+
+async def get_sysname(hass: HomeAssistant, host: str, community: str, port: int) -> Optional[str]:
+    client = SwitchSnmpClient(hass, host, community, port)
+    return await client._async_get_one(OID_sysName)
