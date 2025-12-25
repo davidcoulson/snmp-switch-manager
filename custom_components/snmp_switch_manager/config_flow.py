@@ -22,6 +22,9 @@ from .const import (
     CONF_EXCLUDE_STARTS_WITH,
     CONF_EXCLUDE_CONTAINS,
     CONF_EXCLUDE_ENDS_WITH,
+    CONF_PORT_RENAME_USER_RULES,
+    CONF_PORT_RENAME_DISABLED_DEFAULT_IDS,
+    DEFAULT_PORT_RENAME_RULES,
 )
 from .snmp import test_connection, get_sysname
 
@@ -127,7 +130,177 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         """Entry point for the options flow."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["device", "include_rules", "exclude_rules", "custom_oids"],
+            menu_options=[
+                "device",
+                "include_rules",
+                "exclude_rules",
+                "port_name_rules",
+                "custom_oids",
+            ],
+        )
+
+    async def async_step_port_name_rules(self, user_input=None) -> FlowResult:
+        """Menu for managing port display name rules."""
+        return self.async_show_menu(
+            step_id="port_name_rules",
+            menu_options=[
+                "port_rename_defaults",
+                "port_rename_custom",
+                "port_rename_restore_defaults",
+                "init",
+            ],
+        )
+
+    async def async_step_port_rename_restore_defaults(self, user_input=None) -> FlowResult:
+        """Restore built-in default port rename rules (re-enable all)."""
+        self._options.pop(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS, None)
+        await self._apply_options_and_reload()
+        return await self.async_step_port_name_rules()
+
+    async def async_step_port_rename_defaults(self, user_input=None) -> FlowResult:
+        """Enable/disable built-in default port rename rules."""
+        # Provide an explicit back navigation option without saving.
+        # (The window close button cancels the flow entirely.)
+        if user_input is not None:
+            if user_input.get("defaults_action") == "back":
+                return await self.async_step_port_name_rules()
+
+            disabled: list[str] = []
+            for r in DEFAULT_PORT_RENAME_RULES:
+                rid = r.get("id")
+                if not rid:
+                    continue
+                enabled = bool(user_input.get(f"builtin_{rid}", True))
+                if not enabled:
+                    disabled.append(rid)
+
+            if disabled:
+                self._options[CONF_PORT_RENAME_DISABLED_DEFAULT_IDS] = disabled
+            else:
+                self._options.pop(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS, None)
+
+            await self._apply_options_and_reload()
+            return await self.async_step_port_name_rules()
+
+        disabled = set(self._options.get(CONF_PORT_RENAME_DISABLED_DEFAULT_IDS) or [])
+
+        schema_dict = {
+            vol.Required("defaults_action", default="save"): vol.In(
+                {"save": "Save", "back": "Back"}
+            ),
+        }
+
+        lines: list[str] = []
+        for r in DEFAULT_PORT_RENAME_RULES:
+            rid = r.get("id")
+            if not rid:
+                continue
+            desc = (r.get("description") or "").strip()
+            pat = (r.get("pattern") or "").strip()
+            rep = (r.get("replace") or "").strip()
+
+            # Human-readable built-ins list (rendered via description placeholder)
+            lines.append(
+                "• {rid}: {desc}\n  `{pat}` → `{rep}`".format(
+                    rid=rid,
+                    desc=desc or "(no description)",
+                    pat=pat,
+                    rep=rep,
+                )
+            )
+
+            # Checkboxes use predictable keys so they can be translated.
+            schema_dict[vol.Optional(f"builtin_{rid}", default=(rid not in disabled))] = bool
+
+        return self.async_show_form(
+            step_id="port_rename_defaults",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={"rules": "\n".join(lines) if lines else ""},
+        )
+
+    async def async_step_port_rename_custom(self, user_input=None) -> FlowResult:
+        """Menu for adding/removing custom port rename rules."""
+        return self.async_show_menu(
+            step_id="port_rename_custom",
+            menu_options=["port_rename_custom_add", "port_rename_custom_remove", "port_name_rules"],
+        )
+
+    async def async_step_port_rename_custom_add(self, user_input=None) -> FlowResult:
+        """Add a custom port rename regex rule."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            pattern = (user_input.get("pattern") or "").strip()
+            replace = user_input.get("replace") or ""
+            description = (user_input.get("description") or "").strip()
+
+            if not pattern:
+                errors["pattern"] = "required"
+            else:
+                try:
+                    re.compile(pattern)
+                except Exception:
+                    errors["pattern"] = "invalid_regex"
+
+            if not errors:
+                rules = list(self._options.get(CONF_PORT_RENAME_USER_RULES) or [])
+                rules.append({"pattern": pattern, "replace": replace, "description": description})
+                self._options[CONF_PORT_RENAME_USER_RULES] = rules
+                await self._apply_options_and_reload()
+                return await self.async_step_port_rename_custom()
+
+        schema = vol.Schema(
+            {
+                vol.Required("pattern"): str,
+                vol.Optional("replace", default=""): str,
+                vol.Optional("description", default=""): str,
+            }
+        )
+        return self.async_show_form(step_id="port_rename_custom_add", data_schema=schema, errors=errors)
+
+    async def async_step_port_rename_custom_remove(self, user_input=None) -> FlowResult:
+        """Remove a custom port rename rule."""
+        rules = list(self._options.get(CONF_PORT_RENAME_USER_RULES) or [])
+
+        if not rules:
+            return self.async_show_form(
+                step_id="port_rename_custom_remove",
+                data_schema=vol.Schema({}),
+                description_placeholders={"current_rules": "• (none)"},
+            )
+
+        if user_input is not None:
+            idx = user_input.get("remove_index")
+            try:
+                i = int(idx)
+                if 0 <= i < len(rules):
+                    rules.pop(i)
+            except Exception:
+                pass
+
+            if rules:
+                self._options[CONF_PORT_RENAME_USER_RULES] = rules
+            else:
+                self._options.pop(CONF_PORT_RENAME_USER_RULES, None)
+
+            await self._apply_options_and_reload()
+            return await self.async_step_port_rename_custom()
+
+        opts = {}
+        lines: list[str] = []
+        for i, r in enumerate(rules):
+            pat = (r.get("pattern") or "").strip()
+            rep = (r.get("replace") or "").strip()
+            desc = (r.get("description") or "").strip()
+            label = desc or f"{pat} → {rep}"
+            opts[str(i)] = f"{i+1}. {label}"
+            lines.append(f"{i+1}. {pat} → {rep}" + (f" — {desc}" if desc else ""))
+
+        schema = vol.Schema({vol.Required("remove_index"): vol.In(opts)})
+        return self.async_show_form(
+            step_id="port_rename_custom_remove",
+            data_schema=schema,
+            description_placeholders={"current_rules": "\n".join(lines) if lines else "• (none)"},
         )
 
     async def async_step_device(self, user_input=None) -> FlowResult:
