@@ -8,8 +8,7 @@
         "data": {
           "host": "Host/IP",
           "community": "SNMP community (RW for alias writes)",
-          "port": "Port",
-          "name": "Friendly name (optional)"
+          "port": "Port"
         }
       }
     },
@@ -26,8 +25,16 @@
           "device": "Connection & Name",
           "include_rules": "Manage Included Interfaces",
           "exclude_rules": "Manage Excluded Interfaces",
+          "builtin_filters": "Built-in Vendor Filters",
           "port_name_rules": "Port Name Rules",
           "custom_oids": "Custom Diagnostic OIDs"
+        }
+      },
+      "builtin_filters": {
+        "title": "Built-in Vendor Filters",
+        "description": "Enable or disable built-in vendor interface filter rules for this device.\n\nDisabled rules will not be applied during interface discovery.",
+        "data": {
+          "disabled_vendor_filter_rule_ids": "Disabled built-in filter rules"
         }
       },
       "port_name_rules": {
@@ -85,8 +92,7 @@
         "description": "Optional per-device overrides. Leave blank to use values from initial setup.",
         "data": {
           "override_community": "SNMP community override (optional)",
-          "override_port": "SNMP port override (optional)",
-          "override_name": "Friendly name override (optional)"
+          "override_port": "SNMP port override (optional)"
         }
       },
       "include_rules": {
