@@ -193,3 +193,40 @@ Add real-time **PoE power usage, status, and budget monitoring** for supported P
   - Interface Exclude rules
 - Converts user-friendly selections into backend regex rules
 - Advanced regex mode remains fully available and unchanged
+
+---
+
+### 🔐 SNMPv3 Support (Secure SNMP)
+**Priority:** 🟡 Medium  
+**Target Release:** TBD (post v0.4.x)
+
+Add optional support for **SNMPv3** to enable secure, authenticated, and encrypted communication with supported network devices.
+
+#### Planned Capabilities
+- 🔐 **SNMPv3 authentication**
+  - Username-based access
+  - Support for common auth protocols (e.g. SHA / MD5)
+- 🔒 **Optional SNMPv3 encryption**
+  - Privacy (encryption) protocols where supported by the device
+- 🔄 **SNMP version selection per device**
+  - SNMPv2c and SNMPv3 configurable independently
+  - No global migration requirement
+
+#### Design Goals
+- ✅ **Backward compatible**
+  - Existing SNMPv2c configurations remain unchanged
+- ✅ **Per-device configuration**
+  - SNMP version and credentials scoped to the selected device only
+- ✅ **Unified polling logic**
+  - No changes to entity models, OID handling, or UI behavior
+- ✅ **Async-safe implementation**
+  - Fully compatible with Home Assistant’s event loop
+- ✅ **Secure credential storage**
+  - All secrets managed via Home Assistant config entries
+
+#### Notes
+- Initial implementation may prioritize **SNMP GET operations**  
+  (WALK support may be expanded incrementally)
+- Feature is optional and **will not be required** for standard operation
+- Implementation scope depends on device compatibility and performance validation
+
