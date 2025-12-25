@@ -26,21 +26,9 @@ def _abbr_from_speed_or_name(name: str) -> str:
 
 def format_interface_name(raw_name: str, unit: int=1, slot: int=0, port: Optional[int]=None) -> str:
     rn = (raw_name or "").strip()
-    lower = rn.lower()
-
-    if lower.startswith("vl"):
-        return rn
-    if lower.startswith("link aggregate"):
-        try:
-            num = int(rn.split()[-1])
-            return f"Po{num}"
-        except Exception:
-            return rn
-    if lower.startswith("port-channel") or lower.startswith("po"):
-        return rn if rn[:2].lower() == "po" else "Po" + rn.split()[-1]
-
-    if lower.startswith("lo"):
-        return "Lo0"
+    # NOTE: Vendor-specific display normalizations (e.g., link aggregate -> Po)
+    # are handled by the configurable port rename rules. This function provides
+    # a stable base formatting for unit/slot/port style names.
 
     if port is not None:
         abbr = _abbr_from_speed_or_name(rn)
