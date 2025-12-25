@@ -183,4 +183,13 @@ Add real-time **PoE power usage, status, and budget monitoring** for supported P
 
 ## 📦 Backlog (Advanced / Long-Term)
 
-- 🧮 **Nothing here yet**
+### 🎛️ Simple Mode (Rule Helpers)
+**Priority:** 🟡 Medium  
+**Target Release:** v0.3.4+
+
+- Optional simplified UI for:
+  - Port Name Rules
+  - Interface Include rules
+  - Interface Exclude rules
+- Converts user-friendly selections into backend regex rules
+- Advanced regex mode remains fully available and unchanged
