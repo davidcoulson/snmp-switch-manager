@@ -6,70 +6,156 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_COMMUNITY = "community"
 CONF_NAME = "name"
-CONF_CUSTOM_OIDS = "custom_oids"
-CONF_ENABLE_CUSTOM_OIDS = "enable_custom_oids"
-CONF_RESET_CUSTOM_OIDS = "reset_custom_oids"
-
-# Device Options (per-config-entry overrides)
-CONF_OVERRIDE_COMMUNITY = "override_community"
-CONF_OVERRIDE_PORT = "override_port"
-CONF_OVERRIDE_NAME = "override_name"
-CONF_INCLUDE_STARTS_WITH = "include_starts_with"
-CONF_INCLUDE_CONTAINS = "include_contains"
-CONF_INCLUDE_ENDS_WITH = "include_ends_with"
-CONF_EXCLUDE_STARTS_WITH = "exclude_starts_with"
-CONF_EXCLUDE_CONTAINS = "exclude_contains"
-CONF_EXCLUDE_ENDS_WITH = "exclude_ends_with"
 
 DEFAULT_PORT = 161
 DEFAULT_POLL_INTERVAL = 10  # seconds
 
 PLATFORMS = ["sensor", "switch"]
 
-# OIDs
+# --- Diagnostic OIDs (built-in defaults) ---
+# Standard SNMP system OIDs
 OID_sysDescr = "1.3.6.1.2.1.1.1.0"
-OID_sysName = "1.3.6.1.2.1.1.5.0"
 OID_sysUpTime = "1.3.6.1.2.1.1.3.0"
+OID_sysName = "1.3.6.1.2.1.1.5.0"
 
-# IF-MIB
-OID_ifIndex = "1.3.6.1.2.1.2.2.1.1"         # table
-OID_ifDescr = "1.3.6.1.2.1.2.2.1.2"         # table
-OID_ifType = "1.3.6.1.2.1.2.2.1.3"          # table
-OID_ifAdminStatus = "1.3.6.1.2.1.2.2.1.7"   # table
-OID_ifOperStatus = "1.3.6.1.2.1.2.2.1.8"    # table
-OID_ifName = "1.3.6.1.2.1.31.1.1.1.1"       # table (ifXTable)
-OID_ifAlias = "1.3.6.1.2.1.31.1.1.1.18"     # table (RW)
+# ENTITY-MIB (used for some vendor firmware/model/manufacturer)
+OID_entPhysicalMfgName = "1.3.6.1.2.1.47.1.1.1.1.12"
+OID_entPhysicalModelName = "1.3.6.1.2.1.47.1.1.1.1.13"
+OID_entPhysicalSoftwareRev = "1.3.6.1.2.1.47.1.1.1.1.10"
+OID_entPhysicalSerialNum = "1.3.6.1.2.1.47.1.1.1.1.11"
 
-# IF-MIB (interface speeds)
-OID_ifSpeed = "1.3.6.1.2.1.2.2.1.5"         # table (bps)
-OID_ifHighSpeed = "1.3.6.1.2.1.31.1.1.1.15" # table (Mbps)
+# Zyxel specific
+OID_entPhysicalMfgName_Zyxel = "1.3.6.1.2.1.47.1.1.1.1.12.67108992"
+OID_zyxel_firmware_version = "1.3.6.1.4.1.890.1.15.3.1.6.0"
 
-# BRIDGE-MIB / Q-BRIDGE-MIB (VLAN/PVID)
-# dot1dBasePortIfIndex maps bridge port number <-> ifIndex
-OID_dot1dBasePortIfIndex = "1.3.6.1.2.1.17.1.4.1.2"  # table
-# dot1qPvid yields the PVID (untagged VLAN) per bridge port
-OID_dot1qPvid = "1.3.6.1.2.1.17.7.1.4.5.1.1"         # table
+# MikroTik RouterOS (MIKROTIK-MIB)
+OID_mikrotik_software_version = "1.3.6.1.4.1.14988.1.1.7.4.0"
+OID_mikrotik_model = "1.3.6.1.4.1.14988.1.1.7.8.0"
 
-# IP-MIB (legacy IPv4 table)
+# This is entPhysicalSoftwareRev with entPhysicalIndex 67109120
+OID_entPhysicalSoftwareRev_CBS350 = "1.3.6.1.2.1.47.1.1.1.1.10.67109120"
+
+# --- IF-MIB base OIDs ---
+OID_ifIndex = "1.3.6.1.2.1.2.2.1.1"
+OID_ifDescr = "1.3.6.1.2.1.2.2.1.2"
+OID_ifType = "1.3.6.1.2.1.2.2.1.3"
+OID_ifMtu = "1.3.6.1.2.1.2.2.1.4"
+OID_ifSpeed = "1.3.6.1.2.1.2.2.1.5"
+OID_ifPhysAddress = "1.3.6.1.2.1.2.2.1.6"
+OID_ifAdminStatus = "1.3.6.1.2.1.2.2.1.7"
+OID_ifOperStatus = "1.3.6.1.2.1.2.2.1.8"
+OID_ifLastChange = "1.3.6.1.2.1.2.2.1.9"
+OID_ifInOctets = "1.3.6.1.2.1.2.2.1.10"
+OID_ifInUcastPkts = "1.3.6.1.2.1.2.2.1.11"
+OID_ifInNUcastPkts = "1.3.6.1.2.1.2.2.1.12"
+OID_ifInDiscards = "1.3.6.1.2.1.2.2.1.13"
+OID_ifInErrors = "1.3.6.1.2.1.2.2.1.14"
+OID_ifInUnknownProtos = "1.3.6.1.2.1.2.2.1.15"
+OID_ifOutOctets = "1.3.6.1.2.1.2.2.1.16"
+OID_ifOutUcastPkts = "1.3.6.1.2.1.2.2.1.17"
+OID_ifOutNUcastPkts = "1.3.6.1.2.1.2.2.1.18"
+OID_ifOutDiscards = "1.3.6.1.2.1.2.2.1.19"
+OID_ifOutErrors = "1.3.6.1.2.1.2.2.1.20"
+OID_ifOutQLen = "1.3.6.1.2.1.2.2.1.21"
+OID_ifSpecific = "1.3.6.1.2.1.2.2.1.22"
+
+# IF-MIB extras
+OID_ifAlias = "1.3.6.1.2.1.31.1.1.1.18"
+OID_ifName = "1.3.6.1.2.1.31.1.1.1.1"
+OID_ifHighSpeed = "1.3.6.1.2.1.31.1.1.1.15"  # Mbps by RFC, but some devices report bps
+OID_ifHCInOctets = "1.3.6.1.2.1.31.1.1.1.6"
+OID_ifHCOutOctets = "1.3.6.1.2.1.31.1.1.1.10"
+
+# BRIDGE-MIB (PVID / VLAN)
+OID_dot1qPvid = "1.3.6.1.2.1.17.7.1.4.5.1.1"
+
+# BRIDGE-MIB (bridge port -> ifIndex mapping)
+OID_dot1dBasePortIfIndex = "1.3.6.1.2.1.17.1.4.1.2"
+
+# IP-MIB / legacy (IPv4 address to ifIndex mapping)
 OID_ipAdEntAddr = "1.3.6.1.2.1.4.20.1.1"
 OID_ipAdEntIfIndex = "1.3.6.1.2.1.4.20.1.2"
 OID_ipAdEntNetMask = "1.3.6.1.2.1.4.20.1.3"
 
-# ENTITY-MIB — model name column (walk and pick a base-chassis entry)
-OID_entPhysicalModelName = "1.3.6.1.2.1.47.1.1.1.1.13"
+# ---------------------------
+# Options / device overrides
+# ---------------------------
 
-# ENTITY-MIB — CBS350 base-chassis software revision (see Cisco CBS350 SNMP OIDs doc)
-# This is entPhysicalSoftwareRev with entPhysicalIndex 67109120
-OID_entPhysicalSoftwareRev_CBS350 = "1.3.6.1.2.1.47.1.1.1.1.10.67109120"
+# Per-device custom diagnostic OIDs
+CONF_CUSTOM_OIDS = "custom_oids"
+CONF_ENABLE_CUSTOM_OIDS = "enable_custom_oids"
+CONF_RESET_CUSTOM_OIDS = "reset_custom_oids"
 
-# MikroTik RouterOS (MIKROTIK-MIB .1.3.6.1.4.1.14988.1.1.7)
-# routerBoardInfoSoftwareVersion: "7.20.6"
-OID_mikrotik_software_version = "1.3.6.1.4.1.14988.1.1.7.4.0"
-# routerBoardInfoModel: "CRS305-1G-4S+"
-OID_mikrotik_model = "1.3.6.1.4.1.14988.1.1.7.8.0"
+# Device options (overrides)
+CONF_OVERRIDE_COMMUNITY = "override_community"
+CONF_OVERRIDE_PORT = "override_port"
+CONF_OVERRIDE_NAME = "override_name"
 
-# Zyxel (vendor-specific)
-# Manufacturer via ENTITY-MIB entPhysicalMfgName for base chassis
-OID_entPhysicalMfgName_Zyxel = "1.3.6.1.2.1.47.1.1.1.1.12.67108992"
-# Firmware version via Zyxel enterprise OID
-OID_zyxel_firmware_version = "1.3.6.1.4.1.890.1.15.3.1.6.0"
+# Include/exclude rules (simple modes)
+CONF_INCLUDE_STARTS_WITH = "include_starts_with"
+CONF_INCLUDE_CONTAINS = "include_contains"
+CONF_INCLUDE_ENDS_WITH = "include_ends_with"
+
+CONF_EXCLUDE_STARTS_WITH = "exclude_starts_with"
+CONF_EXCLUDE_CONTAINS = "exclude_contains"
+CONF_EXCLUDE_ENDS_WITH = "exclude_ends_with"
+
+# Port rename rules (regex)
+CONF_PORT_RENAME_USER_RULES = "port_rename_user_rules"
+CONF_PORT_RENAME_DISABLED_DEFAULT_IDS = "port_rename_disabled_default_ids"
+
+# ---------------------------
+# Built-in port rename rules
+# (Applied to display name only)
+# ---------------------------
+
+DEFAULT_PORT_RENAME_RULES: list[dict[str, str]] = [
+    {
+        "id": "link_aggregate_to_po",
+        "description": "Normalize 'link aggregate N' to 'PoN'",
+        "pattern": r"^link\s+aggregate\s+(\d+)$",
+        "replace": r"Po\1",
+    },
+    {
+        "id": "port_channel_to_po",
+        "description": "Normalize 'Port-channelN' to 'PoN'",
+        "pattern": r"^port-?channel\s*(\d+)$",
+        "replace": r"Po\1",
+    },
+    {
+        "id": "portchannel_to_po",
+        "description": "Normalize 'PortChannelN' to 'PoN'",
+        "pattern": r"^portchannel\s*(\d+)$",
+        "replace": r"Po\1",
+    },
+    {
+        "id": "loopback_to_lo0",
+        "description": "Normalize loopback names to 'Lo0'",
+        "pattern": r"^lo\d*(?:\.\d+)?$",
+        "replace": r"Lo0",
+    },
+    {
+        "id": "unit_slot_port_10g_to_te",
+        "description": "Normalize 'Unit: U Slot: S Port: P 10G' to 'TeU/S/P'",
+        "pattern": r"^Unit:\s*(\d+)\s+Slot:\s*(\d+)\s+Port:\s*(\d+)\s+10G$",
+        "replace": r"Te\1/\2/\3",
+    },
+    {
+        "id": "unit_slot_port_20g_to_tw",
+        "description": "Normalize 'Unit: U Slot: S Port: P 20G' to 'TwU/S/P'",
+        "pattern": r"^Unit:\s*(\d+)\s+Slot:\s*(\d+)\s+Port:\s*(\d+)\s+20G$",
+        "replace": r"Tw\1/\2/\3",
+    },
+    {
+        "id": "unit_slot_port_1g_to_gi",
+        "description": "Normalize 'Unit: U Slot: S Port: P 1G' to 'GiU/S/P'",
+        "pattern": r"^Unit:\s*(\d+)\s+Slot:\s*(\d+)\s+Port:\s*(\d+)\s+1G$",
+        "replace": r"Gi\1/\2/\3",
+    },
+    {
+        "id": "unit_slot_port_100m_to_fa",
+        "description": "Normalize 'Unit: U Slot: S Port: P 100M' to 'FaU/S/P'",
+        "pattern": r"^Unit:\s*(\d+)\s+Slot:\s*(\d+)\s+Port:\s*(\d+)\s+100M$",
+        "replace": r"Fa\1/\2/\3",
+    },
+]
