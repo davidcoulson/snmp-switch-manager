@@ -104,7 +104,7 @@ Available options include:
 - Interface Exclude rules
 - Port Name (rename) rules
 - Custom Diagnostic OIDs
-- Uptime polling interval (per-device, configurable)
+- Uptime polling interval (configurable, default 300 seconds)
 
 The Uptime polling interval controls how often the switch Uptime (sysUpTime)
 diagnostic sensor is refreshed. This can be tuned per device to balance
