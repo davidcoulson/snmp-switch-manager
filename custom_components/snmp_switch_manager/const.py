@@ -88,6 +88,8 @@ CONF_RESET_CUSTOM_OIDS = "reset_custom_oids"
 # Device options (overrides)
 CONF_UPTIME_POLL_INTERVAL = "uptime_poll_interval"
 DEFAULT_UPTIME_POLL_INTERVAL = 300  # seconds
+MIN_UPTIME_POLL_INTERVAL = 30  # seconds
+MAX_UPTIME_POLL_INTERVAL = 3600  # seconds
 
 CONF_OVERRIDE_COMMUNITY = "override_community"
 CONF_OVERRIDE_PORT = "override_port" 
