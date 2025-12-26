@@ -17,6 +17,10 @@ from .const import (
     CONF_RESET_CUSTOM_OIDS,
     CONF_OVERRIDE_COMMUNITY,
     CONF_OVERRIDE_PORT,
+    CONF_UPTIME_POLL_INTERVAL,
+    DEFAULT_UPTIME_POLL_INTERVAL,
+    MIN_UPTIME_POLL_INTERVAL,
+    MAX_UPTIME_POLL_INTERVAL,
     CONF_INCLUDE_STARTS_WITH,
     CONF_INCLUDE_CONTAINS,
     CONF_INCLUDE_ENDS_WITH,
@@ -368,6 +372,25 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 except Exception:
                     errors[CONF_OVERRIDE_PORT] = "invalid_port"
 
+            # Uptime (sysUpTime) refresh interval (seconds)
+
+            uptime_raw = str(user_input.get(CONF_UPTIME_POLL_INTERVAL, "")).strip()
+
+            try:
+
+                uptime_val = int(uptime_raw)
+
+                if uptime_val < MIN_UPTIME_POLL_INTERVAL or uptime_val > MAX_UPTIME_POLL_INTERVAL:
+
+                    raise ValueError("out_of_range")
+
+                self._options[CONF_UPTIME_POLL_INTERVAL] = uptime_val
+
+            except Exception:
+
+                errors[CONF_UPTIME_POLL_INTERVAL] = "invalid_uptime_interval"
+
+
             if not errors:
                 self._apply_options()
                 return await self.async_step_init()
@@ -381,6 +404,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_OVERRIDE_PORT,
                     default=str(self._options.get(CONF_OVERRIDE_PORT, "")),
+                ): str,
+                vol.Optional(
+                    CONF_UPTIME_POLL_INTERVAL,
+                    default=str(self._options.get(CONF_UPTIME_POLL_INTERVAL, DEFAULT_UPTIME_POLL_INTERVAL)),
                 ): str,
             }
         )
