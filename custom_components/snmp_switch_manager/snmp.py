@@ -190,6 +190,18 @@ class SwitchSnmpClient:
             v = v[1:]
         return v
 
+
+    def set_uptime_poll_interval(self, seconds: float | int) -> None:
+        """Set the sysUpTime throttling interval (seconds)."""
+        try:
+            val = float(seconds)
+        except Exception:
+            val = 300.0
+        # Guard against non-positive or NaN values
+        if not (val > 0):
+            val = 300.0
+        self._uptime_poll_interval = val
+
     async def _ensure_engine(self) -> None:
         if self.engine is not None:
             return
