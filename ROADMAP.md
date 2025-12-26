@@ -79,6 +79,11 @@ This roadmap reflects **active development priorities** and **realistic implemen
   - Port colors can represent either **Admin / Oper state** or **link speed**
   - User-selectable via card configuration (`color_mode`)
   - Default behavior remains state-based for backward compatibility
+ 
+- ✅ Configurable Uptime polling interval
+  - Per-device control via Device Options
+  - User-defined refresh rate for sysUpTime diagnostics
+  - Safe bounds enforced (30–3600 seconds)
 
 ---
 
