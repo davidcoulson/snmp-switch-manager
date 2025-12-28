@@ -157,16 +157,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.6] - 2025-12-26
 ### Added
-- ⏱️ **Per-device configurable Uptime polling interval**
-  - Exposed via **Device Options**
-  - Controls refresh rate of the Uptime (sysUpTime) diagnostic sensor
-  - Default: **300 seconds (5 minutes)**
-  - Configurable range: **30–3600 seconds**
-  - Applies immediately without restart
+- 📶 **Bandwidth Sensors (RX / TX throughput & total traffic)**
+  - Optional per-device bandwidth sensors
+  - RX/TX rate sensors (bits per second)
+  - Total RX/TX byte counters
+  - Per-device enable / disable
+  - Per-device polling interval
+  - Independent include and exclude rules
+- 🧰 **Bandwidth Sensor rule engine**
+  - Include rules: Starts with / Contains / Ends with
+  - Exclude rules always take precedence
+  - Rules apply immediately and persist across restarts
+  - Bandwidth rules are fully isolated from Interface Include / Exclude rules
+- 🧭 **Expanded Device Options menu**
+  - Dedicated Bandwidth Sensors sub-menu
+  - Independent configuration from interface discovery rules
+
+### Improved
+- 🔄 Device Options flow stability
+  - All option dialogs now return cleanly to the parent menu
 
 ### Fixed
-- 🚧 Removed hard-coded Uptime refresh interval
-- 🚧 Prevented excessive coordinator updates from high-frequency uptime polling
+- 🚧 Bandwidth polling interval validation and persistence
+- 🚧 Incorrect interface speed on some devices that report in bps
 
 <!-- ROADMAP ANCHOR LINKS -->
 
