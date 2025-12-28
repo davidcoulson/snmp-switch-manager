@@ -186,9 +186,6 @@
         "title": "Built-in Rename Rules"
       }
     },
-    "flow": {
-      "step": {}
-    }
   },
   "title": "SNMP Switch Manager"
 }
