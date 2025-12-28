@@ -272,7 +272,7 @@ Once complete, everything will be fully managed by HACS and you will continue to
 
 ### Manual installation
 
-1. Download the `snmp-switch-manager-card.js` file from the [SNMP Switch Manager Card repository](https://github.com/OtisPresley/snmp-switch-manager-card/tree/main/dist) and place it in Home Assistant here:
+1. Download the `snmp-switch-manager-card.js` file and place it in Home Assistant here:
 `/config/www/community/snmp-switch-manager-card/`
 
 2. Add **only one** JavaScript resource under  
@@ -286,11 +286,11 @@ Once complete, everything will be fully managed by HACS and you will continue to
    
 ---
 
-### Configuration
+## Configuration
 
 1. Place the card on any dashboard and edit via the GUI or in YAML:
 
-   <table>
+  <table>
     <tr>
       <td align="center">
         <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot1.png" width="250">
@@ -299,30 +299,34 @@ Once complete, everything will be fully managed by HACS and you will continue to
   </table>
 
    ```yaml
-   type: custom:snmp-switch-manager-card
-   title: Core Switch
-   view: panel
-   ports_per_row: 24
-   info_position: below
-   label_size: 6
-   anchor_entity: switch.gi1_0_1
-   port_size: 18
-   gap: 10
-   
-   # Optional display controls
-   hide_diagnostics: false
-   hide_virtual_interfaces: false
-   
-   # Optional panel background image (panel view only)
-   background_image: /local/switches/core-switch.png
-   ports_offset_x: 0
-   ports_offset_y: 0
-   ports_scale: 1
-   
-   # Optional per-port positioning overrides
-   port_positions:
-     Gi1/0/1: { x: 120, y: 80 }
-     Gi1/0/2: { x: 150, y: 80 }
+    type: custom:snmp-switch-manager-card
+    type: custom:snmp-switch-manager-card
+    title: Core Switch
+    view: panel
+    
+    # Select the SNMP Switch Manager device
+    device: SWITCH-BONUSCLOSET
+    
+    ports_per_row: 24
+    info_position: below
+    label_size: 6
+    port_size: 18
+    gap: 10
+    
+    # Optional display controls
+    hide_diagnostics: false
+    hide_virtual_interfaces: false
+    
+    # Optional panel background image (panel view only)
+    background_image: /local/switches/core-switch.png
+    ports_offset_x: 0
+    ports_offset_y: 0
+    ports_scale: 1
+    
+    # Optional per-port positioning overrides
+    port_positions:
+      Gi1/0/1: { x: 120, y: 80 }
+      Gi1/0/2: { x: 150, y: 80 }
    ```
 
    The follows are descriptions of the settings:
@@ -332,8 +336,6 @@ Once complete, everything will be fully managed by HACS and you will continue to
    - `panel width` The total width of the card in pixels when in panel view.
    - `info_position` displays the Diagnostics and Virtual Interfaces either `above` the phisical ports or `below` them.
    - `label_size` determines the font size used for the port labels when in panel view.
-   - `anchor_entity` is any entity in your switch so it knows which ports and diagnostics to display.
-   - `diagnostics` is a list of sensors you want to display in the diagnostics area.
    - `port_size` determines the size of the port images when in panel view.
    - `gap` determines how far apart the ports are when in panel view.
    - `hide_diagnostics` hides the Diagnostics panel entirely when set to `true`.
@@ -342,17 +344,25 @@ Once complete, everything will be fully managed by HACS and you will continue to
    - `ports_offset_x` and `ports_offset_y` move all ports to align with the background image.
    - `ports_scale` scales all ports uniformly.
    - `port_positions` allows individual ports to be positioned manually.
+   - `device` selects the SNMP Switch Manager device from Home Assistant’s Device Registry.
+     - Diagnostics are automatically discovered (Hostname, Manufacturer, Model, Firmware Revision, Uptime).
+     - Diagnostics order can be customized directly in the card editor.
    - `color_mode` controls how port colors are interpreted:
      - `state` (default): colors reflect Admin / Oper status
      - `speed`: colors reflect negotiated link speed
+
+
       
    Clicking a port opens a unified information dialog (used in both panel and list views) showing:
 
   - Interface name
   - Admin and Oper status
+  - RX and TX throughput and cumulative
   - Speed
   - VLAN ID
   - Interface index
+  - Turn on/off button
+  - Graph button
   
   The port power toggle updates live in the dialog as soon as the port state changes.
 
@@ -368,35 +378,124 @@ Once complete, everything will be fully managed by HACS and you will continue to
         <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot4.png" width="250">
       </td>
     </tr>
+    <tr>
+      <td align="center">
+        <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot13.png" width="250">
+      </td>
+      <td align="center">
+        <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot14.png" width="250">
+      </td>
+      <td align="center">
+        <img src="https://raw.githubusercontent.com/otispresley/snmp-switch-manager/main/assets/screenshot15.png" width="250">
+      </td>
+    </tr>
   </table>
 
-### 🎨 Port Color Legend
+---
 
-Port colors can represent either **port state** or **link speed**, depending on the selected `color_mode`.
+## 🧲 Drag-and-Drop Port Calibration (Panel View)
 
-#### State Mode (default)
-- 🟩 **Green** — Admin: Up · Oper: Up  
-- 🟥 **Red** — Admin: Up · Oper: Down  
-- 🟧 **Orange** — Admin: Down · Oper: Down  
-- ⬜ **Gray** — Admin: Up · Oper: Not Present  
+When using **panel view** with a custom switch background image, the card provides an optional
+**drag-and-drop calibration mode** to make aligning ports fast and intuitive.
 
-#### Speed Mode
-- 🟦 **Blue** — 10 Gbps  
-- 🟩 **Green** — 1 Gbps  
-- 🟧 **Orange** — 100 Mbps  
-- 🟥 **Red** — 10 Mbps  
-- ⬜ **Gray** — Unknown or non-standard speed  
+### What it does
+- Allows ports to be **visually repositioned** by dragging them directly on the card
+- Designed to precisely align ports with **real switch faceplates**
+- Eliminates trial-and-error guessing of `x/y` coordinates
 
-#### Example
+### How it works
+1. Enable **Calibration Mode** in the card editor
+2. Drag ports into their desired positions on the background image
+3. Copy the generated **`port_positions` JSON**
+4. Paste it into the card configuration
+5. Disable Calibration Mode when finished
+
+The generated positions use the same structure as manual configuration:
+
 ```yaml
-type: custom:snmp-switch-manager-card
-device: SWITCH-BONUSCLOSET
-color_mode: speed
+port_positions:
+  Gi1/0/1: { x: 120, y: 80 }
+  Gi1/0/2: { x: 150, y: 80 }
 ```
 
-ℹ️ If color_mode is not specified, the card defaults to state-based coloring for full backward compatibility.
+## 📈 Bandwidth Monitoring & History Graphs
+
+When **Bandwidth Sensors** are enabled in the **SNMP Switch Manager integration**, the Switch Manager card automatically enhances the port popup with real-time throughput data and historical graphs.
+
+### What’s included
+- **RX and TX throughput values** displayed directly in the port popup
+- 📊 **History graph button** per interface
+- RX and TX plotted together in a single statistics graph
+- Uses Home Assistant’s native **Statistics Graph** card
+
+### Popup behavior
+- The bandwidth graph opens in a **modal popup**
+- Includes a **manual refresh button**
+- Prevents constant redraws and unnecessary re-renders
+- Popup remains visible until explicitly closed by the user
+
+### Conditional display
+The bandwidth section is shown **only when all conditions are met**:
+- Bandwidth Sensors are enabled for the device
+- The interface has valid RX and TX sensor entities
+- Sensor values are numeric and available
+
+Interfaces without bandwidth sensors remain unchanged and do not show empty fields or inactive controls.
+
+> ℹ️ No additional card configuration is required.  
+> The card automatically detects and uses the bandwidth sensors created by the integration.
 
 ---
+
+## 🧠 Performance Notes
+
+- The history graph does **not auto-refresh** continuously
+- A manual refresh button is provided to:
+  - Improve dashboard performance
+  - Avoid flickering or unpredictable redraw behavior
+- This mirrors the behavior of a standalone Statistics Graph card while keeping the UI lightweight
+
+---
+
+## 🎨 Port Color Legend
+
+  Port colors can represent either **port state** or **link speed**, depending on the selected `color_mode`.
+  
+  ### State Mode (default)
+  - 🟩 **Green** — Admin: Up · Oper: Up  
+  - 🟥 **Red** — Admin: Up · Oper: Down  
+  - 🟧 **Orange** — Admin: Down · Oper: Down  
+  - ⬜ **Gray** — Admin: Up · Oper: Not Present  
+  
+  ### Speed Mode
+
+  When `color_mode: speed` is enabled, port colors represent the negotiated link speed:
+  
+  - <img src="https://singlecolorimage.com/get/ef4444/18x18" width="18" height="18" style="vertical-align:middle" /> **Red** — 10 Mbps
+  - <img src="https://singlecolorimage.com/get/f59e0b/18x18" width="18" height="18" style="vertical-align:middle" /> **Orange** — 100 Mbps
+  - <img src="https://singlecolorimage.com/get/22c55e/18x18" width="18" height="18" style="vertical-align:middle" /> **Green** — 1 Gbps
+  - <img src="https://singlecolorimage.com/get/18b8a6/18x18" width="18" height="18" style="vertical-align:middle" /> **Teal** — 2.5 Gbps
+  - <img src="https://singlecolorimage.com/get/0ea5e9/18x18" width="18" height="18" style="vertical-align:middle" /> **Cyan** — 5 Gbps
+  - <img src="https://singlecolorimage.com/get/3b82f6/18x18" width="18" height="18" style="vertical-align:middle" /> **Blue** — 10 Gbps
+  - <img src="https://singlecolorimage.com/get/6366f1/18x18" width="18" height="18" style="vertical-align:middle" /> **Indigo** — 18 Gbps
+  - <img src="https://singlecolorimage.com/get/8b5cf6/18x18" width="18" height="18" style="vertical-align:middle" /> **Violet** — 25 Gbps
+  - <img src="https://singlecolorimage.com/get/a855f7/18x18" width="18" height="18" style="vertical-align:middle" /> **Purple** — 40 Gbps
+  - <img src="https://singlecolorimage.com/get/d946ef/18x18" width="18" height="18" style="vertical-align:middle" /> **Fuchsia** — 50 Gbps
+  - <img src="https://singlecolorimage.com/get/ec4899/18x18" width="18" height="18" style="vertical-align:middle" /> **Pink** — 100 Gbps
+  - <img src="https://singlecolorimage.com/get/9ca3af/18x18" width="18" height="18" style="vertical-align:middle" /> **Gray** — Unknown or unsupported speed
+
+  > ℹ️ Speed values are automatically parsed from SNMP attributes and normalized.
+  > The card supports both numeric (e.g. `2500`, `100000`) and textual
+  > representations (e.g. `2.5G`, `25Gbps`, `100G`).
+
+  ### Example
+  ```yaml
+  type: custom:snmp-switch-manager-card
+  device: SWITCH-BONUSCLOSET
+  color_mode: speed
+  ```
+  
+  > ℹ️ If color_mode is not specified, the card defaults to state-based coloring for full backward compatibility.
 
 ---
 
