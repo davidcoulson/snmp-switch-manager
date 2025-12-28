@@ -7,6 +7,7 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN,
@@ -31,7 +32,18 @@ from .const import (
     CONF_PORT_RENAME_DISABLED_DEFAULT_IDS,
     DEFAULT_PORT_RENAME_RULES,
     BUILTIN_VENDOR_FILTER_RULES,
-    CONF_DISABLED_VENDOR_FILTER_RULE_IDS
+    CONF_DISABLED_VENDOR_FILTER_RULE_IDS,
+    CONF_BW_ENABLED,
+    CONF_BW_INCLUDE_RULES,
+    CONF_BW_EXCLUDE_RULES,
+    CONF_BANDWIDTH_POLL_INTERVAL,
+    DEFAULT_BANDWIDTH_POLL_INTERVAL,
+    CONF_BW_INCLUDE_STARTS_WITH,
+    CONF_BW_INCLUDE_CONTAINS,
+    CONF_BW_INCLUDE_ENDS_WITH,
+    CONF_BW_EXCLUDE_STARTS_WITH,
+    CONF_BW_EXCLUDE_CONTAINS,
+    CONF_BW_EXCLUDE_ENDS_WITH,
 )
 from .snmp import test_connection, get_sysname
 
@@ -148,6 +160,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 "builtin_filters",
                 "port_name_rules",
                 "custom_oids",
+                "bandwidth_sensors",
             ],
         )
 
@@ -346,6 +359,84 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             description_placeholders={"current_rules": "\n".join(lines) if lines else "• (none)"},
         )
 
+    async def async_step_bandwidth_sensors(self, user_input=None) -> FlowResult:
+        """Bandwidth Sensors menu."""
+        return self.async_show_menu(
+            step_id="bandwidth_sensors",
+            menu_options=[
+                "bandwidth_enable_disable",
+                "bandwidth_include_rules",
+                "bandwidth_exclude_rules",
+                "bandwidth_poll_interval",
+                "init",
+            ],
+        )
+
+    async def async_step_bandwidth_enable_disable(self, user_input=None) -> FlowResult:
+        """Enable/Disable bandwidth sensors."""
+        if user_input is not None:
+            self._options[CONF_BW_ENABLED] = bool(user_input.get(CONF_BW_ENABLED))
+            self._apply_options()
+            # Return to the Bandwidth Sensors submenu (do not exit the options flow).
+            return await self.async_step_bandwidth_sensors()
+
+        enabled = self._options.get(CONF_BW_ENABLED, False)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_BW_ENABLED, default=enabled): selector.BooleanSelector(),
+            }
+        )
+        return self.async_show_form(step_id="bandwidth_enable_disable", data_schema=schema)
+
+    async def async_step_bandwidth_poll_interval(self, user_input=None) -> FlowResult:
+        """Set poll interval for bandwidth sensors."""
+        errors = {}
+        current = self._options.get(CONF_BANDWIDTH_POLL_INTERVAL, DEFAULT_BANDWIDTH_POLL_INTERVAL)
+
+        # In some HA builds, optional selector fields may be omitted from user_input
+        # if the user leaves them unchanged. Treat a missing value as "keep current".
+        if user_input is not None:
+            raw = user_input.get(CONF_BANDWIDTH_POLL_INTERVAL, current)
+            try:
+                # Some frontends/versions return a dict like {"value": 30}.
+                if isinstance(raw, dict) and "value" in raw:
+                    raw = raw["value"]
+                # NumberSelector may return int or float depending on frontend; accept both.
+                if isinstance(raw, (int, float)):
+                    value = int(raw)
+                else:
+                    value = int(float(str(raw).strip()))
+                if value < 5 or value > 3600:
+                    raise ValueError
+            except Exception:
+                errors["base"] = "invalid_poll_interval"
+            else:
+                self._options[CONF_BANDWIDTH_POLL_INTERVAL] = value
+                self._apply_options()
+                # Return to the Bandwidth Sensors submenu (do not exit the options flow).
+                return await self.async_step_bandwidth_sensors()
+        schema = vol.Schema({
+            vol.Required(
+                CONF_BANDWIDTH_POLL_INTERVAL,
+                default=int(current),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=5,
+                    max=3600,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="s",
+                )
+            )
+        })
+        return self.async_show_form(step_id="bandwidth_poll_interval", data_schema=schema, errors=errors)
+
+    async def async_step_bandwidth_include_rules(self, user_input=None) -> FlowResult:
+        return await self._async_step_bw_rules(include=True, user_input=user_input)
+
+    async def async_step_bandwidth_exclude_rules(self, user_input=None) -> FlowResult:
+        return await self._async_step_bw_rules(include=False, user_input=user_input)
+
     async def async_step_device(self, user_input=None) -> FlowResult:
         """Per-device connection overrides."""
         errors: dict[str, str] = {}
@@ -434,6 +525,28 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             lines.append("• Ends with: " + ", ".join(ew))
 
         return "\n".join(lines) if lines else "• (none)"
+
+    def _render_bw_rules(self, *, include: bool) -> str:
+        '''Render bandwidth include/exclude rules from bandwidth option keys.'''
+        if include:
+            starts = self._options.get(CONF_BW_INCLUDE_STARTS_WITH, [])
+            contains = self._options.get(CONF_BW_INCLUDE_CONTAINS, [])
+            ends = self._options.get(CONF_BW_INCLUDE_ENDS_WITH, [])
+        else:
+            starts = self._options.get(CONF_BW_EXCLUDE_STARTS_WITH, [])
+            contains = self._options.get(CONF_BW_EXCLUDE_CONTAINS, [])
+            ends = self._options.get(CONF_BW_EXCLUDE_ENDS_WITH, [])
+
+        parts: list[str] = []
+        if starts:
+            parts.extend([f"starts with: {v}" for v in starts])
+        if contains:
+            parts.extend([f"contains: {v}" for v in contains])
+        if ends:
+            parts.extend([f"ends with: {v}" for v in ends])
+
+        return '\n'.join(f"- {p}" for p in parts) if parts else 'none'
+
 
     async def _async_step_rules(self, *, include: bool, user_input=None) -> FlowResult:
         """Shared handler for include/exclude rule management."""
@@ -524,8 +637,111 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
+        # NOTE: These are the *interface* include/exclude rules (not bandwidth rules).
+        # They must use their own step ids so they render the correct titles/labels.
+        # Interface include/exclude rules must render from the interface rule keys.
+        # Bandwidth include/exclude rules must render from the bandwidth rule keys.
         desc = self._render_rules(include=include)
         step_id = "include_rules" if include else "exclude_rules"
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=schema,
+            description_placeholders={"current_rules": desc},
+        )
+
+
+    async def _async_step_bw_rules(self, *, include: bool, user_input=None) -> FlowResult:
+        """Shared handler for include/exclude rule management."""
+
+        KEY_ACTION = "rule_action"
+        KEY_MATCH = "rule_match"
+        KEY_VALUE = "rule_value"
+
+        if user_input is not None:
+            action = user_input.get(KEY_ACTION)
+            match = user_input.get(KEY_MATCH)
+            value = (user_input.get(KEY_VALUE) or "").strip()
+
+            # Done -> back to menu (no additional changes)
+            if action == "done":
+                return await self.async_step_init()
+
+            # Clear all rules in this group
+            if action == "clear":
+                if include:
+                    self._options.pop(CONF_BW_INCLUDE_STARTS_WITH, None)
+                    self._options.pop(CONF_BW_INCLUDE_CONTAINS, None)
+                    self._options.pop(CONF_BW_INCLUDE_ENDS_WITH, None)
+                else:
+                    self._options.pop(CONF_BW_EXCLUDE_STARTS_WITH, None)
+                    self._options.pop(CONF_BW_EXCLUDE_CONTAINS, None)
+                    self._options.pop(CONF_BW_EXCLUDE_ENDS_WITH, None)
+
+                self._apply_options()
+                return await self.async_step_init()
+
+            # Add / Remove
+            if action in ("add", "remove") and value and match in (
+                "starts_with",
+                "contains",
+                "ends_with",
+            ):
+                if include:
+                    k_map = {
+                        "starts_with": CONF_BW_INCLUDE_STARTS_WITH,
+                        "contains": CONF_BW_INCLUDE_CONTAINS,
+                        "ends_with": CONF_BW_INCLUDE_ENDS_WITH,
+                    }
+                else:
+                    k_map = {
+                        "starts_with": CONF_BW_EXCLUDE_STARTS_WITH,
+                        "contains": CONF_BW_EXCLUDE_CONTAINS,
+                        "ends_with": CONF_BW_EXCLUDE_ENDS_WITH,
+                    }
+
+                store_key = k_map[match]
+                cur = list(self._options.get(store_key) or [])
+
+                if action == "add":
+                    if value not in cur:
+                        cur.append(value)
+                else:
+                    cur = [v for v in cur if v != value]
+
+                if cur:
+                    self._options[store_key] = cur
+                else:
+                    self._options.pop(store_key, None)
+
+                self._apply_options()
+                return await self.async_step_init()
+
+            # If incomplete input, just re-show the form (no errors)
+
+        schema = vol.Schema(
+            {
+                vol.Required(KEY_ACTION, default="add"): vol.In(
+                    {
+                        "add": "Add",
+                        "remove": "Remove",
+                        "clear": "Clear all",
+                        "done": "Done",
+                    }
+                ),
+                vol.Required(KEY_MATCH, default="starts_with"): vol.In(
+                    {
+                        "starts_with": "Starts with",
+                        "contains": "Contains",
+                        "ends_with": "Ends with",
+                    }
+                ),
+                vol.Optional(KEY_VALUE, default=""): str,
+            }
+        )
+
+        # Bandwidth include/exclude rules must render from the bandwidth rule keys.
+        desc = self._render_bw_rules(include=include)
+        step_id = "bandwidth_include_rules" if include else "bandwidth_exclude_rules"
         return self.async_show_form(
             step_id=step_id,
             data_schema=schema,
@@ -583,3 +799,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=vol.Schema(schema_dict),
             errors=errors,
         )
+
+    # -------------------------------------------------------------------------
+    # Bandwidth Sensors (fixed): dedicated step_ids + dedicated option keys
+    # -------------------------------------------------------------------------
