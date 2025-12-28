@@ -12,10 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🛣️ Roadmap Tracking
 
-- 📶 **Bandwidth Sensors**  
-  Planned for **v0.4.0**  
-  🔗 See roadmap: [`#roadmap-bandwidth-sensors`](./ROADMAP.md#roadmap-bandwidth-sensors)
-
 - 🌡️ **Switch Environmentals & CPU / Memory Usage**  
   Planned for **v0.4.0**  
   🔗 See roadmap: [`#roadmap-switch-environmentals`](./ROADMAP.md#roadmap-switch-environmentals)
