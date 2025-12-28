@@ -185,7 +185,7 @@
         "description": "Enable or disable built-in display name rules for this device.\n\nCurrent built-ins:\n{rules}",
         "title": "Built-in Rename Rules"
       }
-    },
+    }
   },
   "title": "SNMP Switch Manager"
 }
