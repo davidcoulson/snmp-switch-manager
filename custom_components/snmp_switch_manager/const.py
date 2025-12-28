@@ -91,6 +91,11 @@ DEFAULT_UPTIME_POLL_INTERVAL = 300  # seconds
 MIN_UPTIME_POLL_INTERVAL = 30  # seconds
 MAX_UPTIME_POLL_INTERVAL = 3600  # seconds
 
+CONF_BANDWIDTH_POLL_INTERVAL = "bandwidth_poll_interval"
+DEFAULT_BANDWIDTH_POLL_INTERVAL = 30  # seconds
+MIN_BANDWIDTH_POLL_INTERVAL = 5  # seconds
+MAX_BANDWIDTH_POLL_INTERVAL = 3600  # seconds
+
 CONF_OVERRIDE_COMMUNITY = "override_community"
 CONF_OVERRIDE_PORT = "override_port" 
 
@@ -102,6 +107,21 @@ CONF_INCLUDE_ENDS_WITH = "include_ends_with"
 CONF_EXCLUDE_STARTS_WITH = "exclude_starts_with"
 CONF_EXCLUDE_CONTAINS = "exclude_contains"
 CONF_EXCLUDE_ENDS_WITH = "exclude_ends_with"
+
+# Bandwidth sensor options (per-device)
+CONF_BW_ENABLE = "enable_bandwidth_sensors"
+CONF_BW_INCLUDE_STARTS_WITH = "bw_include_starts_with"
+CONF_BW_INCLUDE_CONTAINS = "bw_include_contains"
+CONF_BW_INCLUDE_ENDS_WITH = "bw_include_ends_with"
+CONF_BW_EXCLUDE_STARTS_WITH = "bw_exclude_starts_with"
+CONF_BW_EXCLUDE_CONTAINS = "bw_exclude_contains"
+CONF_BW_EXCLUDE_ENDS_WITH = "bw_exclude_ends_with"
+
+
+# Backwards/forwards compatibility aliases (config_flow expects these names)
+CONF_BW_ENABLED = CONF_BW_ENABLE
+CONF_BW_INCLUDE_RULES = "bw_include_rules"
+CONF_BW_EXCLUDE_RULES = "bw_exclude_rules"
 
 
 # Built-in vendor interface filtering rule toggles (per-device)
