@@ -85,38 +85,16 @@ This roadmap reflects **active development priorities** and **realistic implemen
   - User-defined refresh rate for sysUpTime diagnostics
   - Safe bounds enforced (30–3600 seconds)
 
+- ✅ 📶 Bandwidth Sensors
+  - Per-device RX / TX throughput sensors
+  - Per-device total traffic counters
+  - Configurable polling interval
+  - Independent include and exclude rules
+  - Full Device Options UI
+
 ---
 
 ## 📝 Planned
-
-### 📶 Bandwidth Sensors  
-**Priority:** 🔴 High  
-**Target Release:** v0.4.0  
-**Tracking:** [`#roadmap-bandwidth-sensors`](./CHANGELOG.md#roadmap-bandwidth-sensors)
-
-Add real-time and cumulative traffic visibility for every network interface.
-
-#### Planned Capabilities
-- ⬆️ **Total Transmit (TX) Bandwidth**  
-  - Cumulative bytes sent per interface  
-- ⬇️ **Total Receive (RX) Bandwidth**  
-  - Cumulative bytes received per interface  
-- ⚡ **Live Throughput (bps)**  
-  - Real-time transmit and receive speeds in bits per second  
-
-#### Design Goals
-- ✅ Works across **all supported platforms**
-  - Cisco SG / CBS  
-  - Arista  
-  - Juniper (EX series)  
-  - OPNsense / pfSense  
-- ✅ Uses **high-capacity 64-bit counters** where available (`ifHCInOctets`, `ifHCOutOctets`)
-- ✅ **Automatic 32-bit counter wrap detection & correction**
-- ✅ **Efficient polling** via the existing coordinator (no per-entity SNMP sessions)
-- ✅ **Minimal Home Assistant performance impact**
-- ✅ Default exposure as **dedicated diagnostic sensors**
-
----
 
 ### 🌡️ Switch Environmentals & CPU / Memory Usage  
 **Priority:** 🔴 High  
