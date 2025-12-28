@@ -43,6 +43,19 @@ from .const import (
     OID_mikrotik_model,
     OID_entPhysicalMfgName_Zyxel,
     OID_zyxel_firmware_version,
+    OID_ifInOctets,
+    OID_ifOutOctets,
+    OID_ifHCInOctets,
+    OID_ifHCOutOctets,
+    CONF_BW_ENABLE,
+    CONF_BW_INCLUDE_STARTS_WITH,
+    CONF_BW_INCLUDE_CONTAINS,
+    CONF_BW_INCLUDE_ENDS_WITH,
+    CONF_BW_EXCLUDE_STARTS_WITH,
+    CONF_BW_EXCLUDE_CONTAINS,
+    CONF_BW_EXCLUDE_ENDS_WITH,
+    CONF_BANDWIDTH_POLL_INTERVAL,
+    DEFAULT_BANDWIDTH_POLL_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,6 +86,67 @@ async def _do_get_one(engine, community, target, context, oid: str) -> Optional[
     for vb in vbs:
         return str(vb[1])
     return None
+
+
+async def _do_get_many(engine, community, target, context, oids: list[str]) -> Dict[str, Optional[str]]:
+    """Fetch many OIDs, chunked to avoid oversized PDUs.
+
+    Returns a mapping of oid string -> value string (or None).
+    """
+
+    out: Dict[str, Optional[str]] = {oid: None for oid in oids}
+    if not oids:
+        return out
+
+    async def _fetch_chunk(chunk: list[str]) -> None:
+        """Fetch a chunk of OIDs.
+
+        Some vendors return errors for larger multi-OID GET requests.
+        We handle that by recursively splitting chunks until they succeed
+        (or down to single-OID requests).
+        """
+        if not chunk:
+            return
+
+        var_binds = [ObjectType(ObjectIdentity(oid)) for oid in chunk]
+        err_ind, err_stat, err_idx, vbs = await get_cmd(
+            engine,
+            community,
+            target,
+            context,
+            *var_binds,
+            lookupMib=False,  # prevent FS MIB access
+        )
+
+        if err_ind or err_stat:
+            # Split & retry (down to per-OID).
+            if len(chunk) == 1:
+                return
+            mid = max(1, len(chunk) // 2)
+            await _fetch_chunk(chunk[:mid])
+            await _fetch_chunk(chunk[mid:])
+            return
+
+        for oid_obj, val in vbs:
+            try:
+                s = val.prettyPrint() if hasattr(val, "prettyPrint") else str(val)
+            except Exception:
+                s = str(val)
+            if not s:
+                out[str(oid_obj)] = None
+                continue
+            s_low = s.lower()
+            if "no such" in s_low or "nosuch" in s_low or "endofmib" in s_low:
+                out[str(oid_obj)] = None
+                continue
+            out[str(oid_obj)] = s
+
+    # Keep requests reasonably sized; we'll split further on vendor errors.
+    CHUNK = 20
+    for i in range(0, len(oids), CHUNK):
+        await _fetch_chunk(oids[i : i + CHUNK])
+
+    return out
 
 
 async def _do_next_walk(
@@ -146,12 +220,18 @@ async def _do_set_admin_status(
 class SwitchSnmpClient:
     """SNMP client using PySNMP v7 asyncio API."""
 
-    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int, custom_oids: Optional[Dict[str, str]] = None) -> None:
+    def __init__(self, hass: HomeAssistant, host: str, community: str, port: int, custom_oids: Optional[Dict[str, str]] = None, bandwidth_options: Optional[Dict[str, Any]] = None) -> None:
         self.hass = hass
         self.host = host
         self.community = community
         self.port = port
         self.custom_oids: Dict[str, str] = dict(custom_oids or {})
+
+        # Bandwidth sensor options (set by config entry options)
+        self._bandwidth_options: Dict[str, Any] = dict(bandwidth_options or {})
+        self._bw_last_poll = None  # monotonic timestamp of last bandwidth counter poll
+        self._bw_use_hc: Optional[bool] = None
+        self._bw_last: Dict[int, Dict[str, Any]] = {}
 
         self.engine = None
         self.target = None
@@ -400,12 +480,14 @@ class SwitchSnmpClient:
             for oid, val in await self._async_walk(OID_ifHighSpeed):
                 idx = int(oid.split(".")[-1])
                 try:
-                    mbps = int(val)
+                    v = int(val)
                 except Exception:
                     continue
-                # ifHighSpeed is Mbps; prefer it when non-zero
-                if mbps > 0:
-                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = mbps * 1_000_000
+                # ifHighSpeed is defined as Mbps (IF-MIB), but some devices incorrectly return bps.
+                # Heuristic: values >= 1,000,000 are treated as bps to avoid 1e6x inflation.
+                if v > 0:
+                    bps = v if v >= 1_000_000 else v * 1_000_000
+                    self.cache["ifTable"].setdefault(idx, {})["speed_bps"] = bps
 
             # VLAN (PVID) mapping via BRIDGE-MIB / Q-BRIDGE-MIB
             # Map ifIndex -> dot1dBasePort -> dot1qPvid (untagged VLAN)
@@ -844,6 +926,141 @@ class SwitchSnmpClient:
             self.cache["firmware"] = firmware
 
         await self.async_refresh_dynamic()
+
+        # Bandwidth sensors (optional; per-device)
+        if bool(self._bandwidth_options.get(CONF_BW_ENABLE, False)):
+            poll_interval = int(self._bandwidth_options.get(CONF_BANDWIDTH_POLL_INTERVAL, DEFAULT_BANDWIDTH_POLL_INTERVAL) or DEFAULT_BANDWIDTH_POLL_INTERVAL)
+            now = time.monotonic()
+            if self._bw_last_poll is not None and (now - self._bw_last_poll) < poll_interval:
+                _LOGGER.debug("Skipping bandwidth counter poll; interval=%ss", poll_interval)
+            else:
+                self._bw_last_poll = now
+                try:
+                    iftable = self.cache.get("ifTable", {}) or {}
+
+                    def _clean_list(key: str) -> list[str]:
+                        return [str(s).strip().lower() for s in (self._bandwidth_options.get(key, []) or []) if str(s).strip()]
+
+                    include_starts = _clean_list(CONF_BW_INCLUDE_STARTS_WITH)
+                    include_contains = _clean_list(CONF_BW_INCLUDE_CONTAINS)
+                    include_ends = _clean_list(CONF_BW_INCLUDE_ENDS_WITH)
+                    exclude_starts = _clean_list(CONF_BW_EXCLUDE_STARTS_WITH)
+                    exclude_contains = _clean_list(CONF_BW_EXCLUDE_CONTAINS)
+                    exclude_ends = _clean_list(CONF_BW_EXCLUDE_ENDS_WITH)
+
+                    def _matches_any(name_l: str, starts: list[str], contains: list[str], ends: list[str]) -> bool:
+                        return (
+                            any(name_l.startswith(x) for x in starts)
+                            or any(x in name_l for x in contains)
+                            or any(name_l.endswith(x) for x in ends)
+                        )
+
+                    selected: list[int] = []
+                    for idx, row in iftable.items():
+                        try:
+                            idx_i = int(idx)
+                        except Exception:
+                            continue
+                        raw_name = str(row.get("name") or "").strip()
+                        if not raw_name:
+                            continue
+                        nl = raw_name.lower()
+                        include_hit = _matches_any(nl, include_starts, include_contains, include_ends)
+                        exclude_hit = _matches_any(nl, exclude_starts, exclude_contains, exclude_ends)
+
+                        # If include rules are defined, only include matches.
+                        if (include_starts or include_contains or include_ends):
+                            if not include_hit:
+                                continue
+
+                        # Exclude always wins
+                        if exclude_hit:
+                            continue
+
+                        selected.append(idx_i)
+
+                    # Detect whether 64-bit counters are supported (once)
+                    if self._bw_use_hc is None:
+                        self._bw_use_hc = False
+                        probe_idx = selected[0] if selected else None
+                        if probe_idx is not None:
+                            probe_oid = f"{OID_ifHCInOctets}.{probe_idx}"
+                            try:
+                                probe_val = await _do_get_one(self.engine, self.community_data, self.target, self.context, probe_oid)
+                                if probe_val is not None:
+                                    int(probe_val)  # validate numeric
+                                    self._bw_use_hc = True
+                            except Exception:
+                                self._bw_use_hc = False
+
+                    now_ts = time.time()
+                    use_hc = bool(self._bw_use_hc)
+
+                    rx_base = OID_ifHCInOctets if use_hc else OID_ifInOctets
+                    tx_base = OID_ifHCOutOctets if use_hc else OID_ifOutOctets
+
+                    oids: list[str] = []
+                    for idx_i in selected:
+                        oids.append(f"{rx_base}.{idx_i}")
+                        oids.append(f"{tx_base}.{idx_i}")
+
+                    got = await _do_get_many(self.engine, self.community_data, self.target, self.context, oids)
+
+                    bw_out: Dict[int, Dict[str, Any]] = {}
+                    for idx_i in selected:
+                        rx_oid = f"{rx_base}.{idx_i}"
+                        tx_oid = f"{tx_base}.{idx_i}"
+                        rx_v = got.get(rx_oid)
+                        tx_v = got.get(tx_oid)
+                        if rx_v is None and tx_v is None:
+                            continue
+                        try:
+                            rx_oct = int(rx_v) if rx_v is not None else None
+                        except Exception:
+                            rx_oct = None
+                        try:
+                            tx_oct = int(tx_v) if tx_v is not None else None
+                        except Exception:
+                            tx_oct = None
+
+                        last = self._bw_last.get(idx_i) or {}
+                        last_ts = float(last.get("ts") or 0.0)
+                        dt = (now_ts - last_ts) if last_ts else 0.0
+
+                        rx_bps = None
+                        tx_bps = None
+                        if dt > 0:
+                            if rx_oct is not None and last.get("rx") is not None:
+                                prev = int(last.get("rx"))
+                                cur = int(rx_oct)
+                                delta = cur - prev
+                                if not use_hc and delta < 0:
+                                    delta += 2 ** 32
+                                rx_bps = (delta * 8.0) / dt
+                            if tx_oct is not None and last.get("tx") is not None:
+                                prev = int(last.get("tx"))
+                                cur = int(tx_oct)
+                                delta = cur - prev
+                                if not use_hc and delta < 0:
+                                    delta += 2 ** 32
+                                tx_bps = (delta * 8.0) / dt
+
+                        self._bw_last[idx_i] = {"ts": now_ts, "rx": rx_oct, "tx": tx_oct}
+
+                        bw_out[idx_i] = {
+                            "ts": now_ts,
+                            "rx_octets": rx_oct,
+                            "tx_octets": tx_oct,
+                            "rx_bps": rx_bps,
+                            "tx_bps": tx_bps,
+                            "use_hc": use_hc,
+                        }
+
+                    self.cache["bandwidth"] = bw_out
+                except Exception as e:
+                    _LOGGER.debug("Bandwidth polling failed: %s", e)
+                    self.cache["bandwidth"] = {}
+
         return self.cache
 
     # ---------- mutations ----------
