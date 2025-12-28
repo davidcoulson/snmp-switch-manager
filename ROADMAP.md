@@ -91,6 +91,11 @@ This roadmap reflects **active development priorities** and **realistic implemen
   - Configurable polling interval
   - Independent include and exclude rules
   - Full Device Options UI
+ 
+- ✅ Bandwidth visualization in the Switch Manager card
+  - RX / TX throughput graph shown together per interface
+  - Popup-based statistics graph with manual refresh
+  - Conditional rendering based on available sensors
 
 ---
 
