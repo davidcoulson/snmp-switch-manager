@@ -4,28 +4,49 @@ import json
 from datetime import timedelta
 from typing import Any
 
+import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_interval, async_call_later
 from homeassistant.config_entries import ConfigEntry
 from .const import DOMAIN, GITHUB_BRANCH
 
 _LOGGER = logging.getLogger(__name__)
 
-DB_FILES = [
+DEFAULT_DB_FILES = [
+    "arp.json",
+    "base_mac.json",
     "cpu.json",
     "device_info.json",
     "fans.json",
+    "fdb.json",
     "interface_classification.json",
     "interface_filters.json",
+    "lldp.json",
     "memory.json",
     "poe.json",
     "power.json",
     "psu.json",
     "rename_rules.json",
     "temperature.json",
-    "vendors.json"
+    "vendors.json",
 ]
+
+
+def get_database_files(db_path: str | None = None) -> list[str]:
+    """Return all JSON database files found in the database directory, merged with known defaults."""
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(__file__), "database")
+    discovered: set[str] = set()
+    if os.path.exists(db_path):
+        try:
+            discovered = {f for f in os.listdir(db_path) if f.endswith(".json")}
+        except Exception as e:
+            _LOGGER.warning("Could not scan database directory %s: %s", db_path, e)
+    return sorted(discovered | set(DEFAULT_DB_FILES))
+
+
+DB_FILES = list(DEFAULT_DB_FILES)
 
 RAW_URL_ROOT = f"https://raw.githubusercontent.com/OtisPresley/snmp-switch-manager/{GITHUB_BRANCH}/custom_components/snmp_switch_manager/database/"
 
@@ -34,15 +55,17 @@ async def async_check_and_update_db(hass: HomeAssistant) -> bool:
     """Download updated database files from GitHub and save them if changed."""
     session = async_get_clientsession(hass)
     db_path = os.path.join(os.path.dirname(__file__), "database")
+    timeout = aiohttp.ClientTimeout(total=15, connect=5)
     
     updated_any = False
     
-    for filename in DB_FILES:
+    filenames = await hass.async_add_executor_job(get_database_files, db_path)
+    for filename in filenames:
         url = f"{RAW_URL_ROOT}{filename}"
         local_path = os.path.join(db_path, filename)
         
         try:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=timeout) as response:
                 if response.status != 200:
                     _LOGGER.debug("Skipping update check for %s: HTTP %s", filename, response.status)
                     continue
@@ -53,15 +76,15 @@ async def async_check_and_update_db(hass: HomeAssistant) -> bool:
                 new_str = json.dumps(new_data, indent=2, sort_keys=True)
                 
                 # Load current local file
-                old_str = None
-                if os.path.exists(local_path):
-                    def read_local() -> str | None:
-                        try:
-                            with open(local_path, "r", encoding="utf-8") as f:
-                                return json.dumps(json.load(f), indent=2, sort_keys=True)
-                        except Exception:
-                            return None
-                    old_str = await hass.async_add_executor_job(read_local)
+                def read_local() -> str | None:
+                    if not os.path.exists(local_path):
+                        return None
+                    try:
+                        with open(local_path, "r", encoding="utf-8") as f:
+                            return json.dumps(json.load(f), indent=2, sort_keys=True)
+                    except Exception:
+                        return None
+                old_str = await hass.async_add_executor_job(read_local)
                 
                 if old_str != new_str:
                     _LOGGER.info("Updating local database file: %s", filename)
@@ -78,8 +101,15 @@ async def async_check_and_update_db(hass: HomeAssistant) -> bool:
                     )
                     updated_any = True
                     
+        except aiohttp.ClientConnectorError as e:
+            _LOGGER.warning("Cannot connect to GitHub for database updates: %s", e)
+            break
+        except (TimeoutError, aiohttp.ClientError) as e:
+            err_msg = str(e) or type(e).__name__
+            _LOGGER.warning("Could not check database update for %s (%s)", filename, err_msg)
         except Exception as e:
-            _LOGGER.error("Failed to check database update for %s: %s", filename, e)
+            err_msg = str(e) or type(e).__name__
+            _LOGGER.warning("Failed to check database update for %s: %s", filename, err_msg)
             
     return updated_any
 
@@ -117,8 +147,7 @@ async def async_setup_db_updater(hass: HomeAssistant, entry: ConfigEntry) -> Non
     def deferred_start(_: Any) -> None:
         hass.add_job(run_update())
         
-    from homeassistant.helpers.event import async_call_later
-    async_call_later(hass, 10, deferred_start)
+    async_call_later(hass, 60, deferred_start)
 
 
 def async_unload_db_updater(hass: HomeAssistant, entry: ConfigEntry) -> None:

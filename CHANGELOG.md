@@ -7,6 +7,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-09-26
+
+### Fixed
+- 📊 **Bandwidth Attributes Mode (`features/bandwidth.py`)**: Fixed an issue where interface entities did not expose RX/TX throughput and total attributes when configured in `attributes` mode because `bw_enabled` and `bw_mode` were not set in the coordinator cache. In addition, clearing stale bandwidth data when bandwidth polling is disabled and defaulting `CONF_BW_MODE` to `BW_MODE_SENSORS` ensures reliable mode handling ([#101](https://github.com/OtisPresley/snmp-switch-manager/issues/101)).
+- 🌡️ **Temperature Polling `invalid_values` & Range Validation (`features/temperature.py`)**: Added support for filtering raw sensor sentinel values specified in `invalid_values` (such as `65535` for disconnected H3C sensors) and added strict `[-20.0, 100.0]` °C temperature range validation (with support for item-specific range overrides) across both table walk and single GET polling paths ([#102](https://github.com/OtisPresley/snmp-switch-manager/issues/102)).
+- 🔄 **Database Updater Missing Topology Files (`db_updater.py`)**: Updated the automatic database updater to include topology files (`arp.json`, `base_mac.json`, `fdb.json`, `lldp.json`) and dynamically discover any JSON database files present in the `database/` directory, ensuring all current and future definitions receive upstream updates ([#103](https://github.com/OtisPresley/snmp-switch-manager/issues/103)).
+
+---
+
+## [0.6.7] - 2026-09-20
+
+### Fixed
+- ⚡ **GETBULK Timeout Fallback (`snmp_compat.py`)**: Fixed an issue where switches whose firmware silently drops SNMPv2c `GetBulkRequest` packets (such as Realtek-based models like the Intellinet 560559 V3) would encounter repeated request timeouts and fail to initialize. The table walk engine now catches non-auth timeouts, remembers that bulk requests are unsupported on the agent, and seamlessly falls back to standard GETNEXT walks. Also added single-OID fallback for chunked GET requests ([#100](https://github.com/OtisPresley/snmp-switch-manager/issues/100)).
+- 🐛 **`ifConnectorPresent` OID Typo**: Corrected `OID_ifConnectorPresent` in `const.py` from `1.3.6.1.2.1.31.1.1.1.10` (`ifHCOutOctets`) to the standard RFC 2863 OID `1.3.6.1.2.1.31.1.1.1.17`. Restores accurate connector presence detection for physical switch ports ([#98](https://github.com/OtisPresley/snmp-switch-manager/issues/98)). Thanks to @hf7a!
+- 🕒 **Database Updater Startup & Network Resilience**: Deferred the initial database update check from 10s to 60s after Home Assistant startup to allow network and DNS services to settle, added request timeouts (15s total, 5s connect), and converted transient offline/timeout errors to warnings.
+
+### Added
+- 🎛️ **Intellinet Vendor Detection & Private PoE MIB Support**: Added enterprise OID mapping for Intellinet Network Solutions (`45855` / `1.3.6.1.4.1.45855`) to `vendors.json` and support for Intellinet private per-port PoE power reporting (`1.3.6.1.4.1.54367.1.2.2.4.4.1.3`) to `poe.json` ([#99](https://github.com/OtisPresley/snmp-switch-manager/issues/99)). Thanks to @jamesleroy03!
+
+---
+
+## [0.6.6] - 2026-09-19
+
+### Improved
+- ⚡ **GETBULK Table Walking (`_do_bulk_walk` & `_async_walk_many`)**: Replaced one-row-at-a-time GETNEXT walks with multi-row, multi-column GETBULK requests for interface tables, entity sensors, and storage metrics. Features adaptive budget halving for agents returning `tooBig`/`genErr`, seamless GETNEXT fallback from the current cursor for agents lacking GETBULK support, and protection against subtree bleeding and non-advancing loops. System info (`sysDescr`, `sysName`, `sysContact`, `sysLocation`) is now batched with `sysUpTime` (every 5 min) in a single request instead of five individual GETs every 10 seconds. Dramatically reduces SNMP round-trips (e.g. 756 to 13 requests on 188-port switches) and Home Assistant event loop CPU decoding load ([#96](https://github.com/OtisPresley/snmp-switch-manager/pull/96)). Huge thanks to @davidcoulson!
+- ⏱️ **Staggered Multi-Switch Polling (`stagger.py`)**: Evenly distributes coordinator poll schedules across the update interval when multiple switches are configured, preventing them from synchronizing their SNMP queries in the same second at startup. Eliminates multi-switch event loop decoding stalls ([#97](https://github.com/OtisPresley/snmp-switch-manager/pull/97)). Huge thanks to @davidcoulson!
+
+---
+
 ## [0.6.5] - 2026-08-27
 
 ### Fixed
